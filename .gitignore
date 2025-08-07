@@ -1,0 +1,38 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+env/
+venv/
+ENV/
+.venv/
+Scripts/
+Include/
+Lib/
+Lib/site-packages/
+
+# PyInstaller build files
+build/
+dist/
+*.spec
+
+# Logs and debug
+*.log
+
+# IDE settings
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# Windows specific
+Thumbs.db
+Desktop.ini
+
+# Executable output
+*.exe
