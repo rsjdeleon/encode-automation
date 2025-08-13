@@ -1,6 +1,6 @@
 import sqlite3
 
-DB_NAME = 'person-b1-ajean.db'
+DB_NAME = 'person.db'
 
 def init_db_person():
     with sqlite3.connect(DB_NAME) as conn:

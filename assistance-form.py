@@ -41,7 +41,8 @@ from config import financial_assistance_list
 from config import relationship_list
 from config import list_of_city
 
-from license import is_trial_valid, activate_trial
+from license import is_trial_valid, activate_trial, get_device_id
+
 
 # Initialize SQLite database
 def init_db():
@@ -1612,7 +1613,8 @@ class MyFrame(wx.Frame):
             self.command_log.AppendText("Please select a checkbox(s). \n")
 
         if self.auto_finish.GetValue() :
-            if is_end_website and is_end_mov and is_end_offline:
+
+            if (is_end_website == self.cb_website.GetValue()) and (is_end_mov == self.cb_mov.GetValue()) and (is_end_offline == self.cb_offline.GetValue()):
 
                 wx.CallAfter(self.set_running_flag, False)  # Reset flag on completion
                 self.stop_requested = False
@@ -1687,6 +1689,7 @@ class MyFrame(wx.Frame):
 
                     self.setDropDown(driver, "select2-mode_of_admission-container", self.mode_of_admission.GetStringSelection())
                     self.setDropDown(driver, "select2-cl_assisted_through-container", "Onsite")
+                    self.setDropDown(driver, "select2-cl_typeid-container", "N/A")
                     self.setDropDown(driver, "select2-cl_referring_party-container", "Default Default Default")
 
                     if not self.has_beneficiary.GetValue():
@@ -1757,6 +1760,7 @@ class MyFrame(wx.Frame):
                 case "beneficiary information":
                     self.setTextField(driver, "b_pcn", "0")
                     self.setDropDown(driver, "select2-b_assisted_through-container", "Onsite")
+                    self.setDropDown(driver, "select2-id_type_id-container", "N/A")
 
                     if self.has_beneficiary.GetValue():
                         self.selectCheckBox(driver, "uniform-same_add_client")
@@ -2019,7 +2023,8 @@ class MyFrame(wx.Frame):
                 sector_value = "senior citizens (no subcategories)"
             #     SENIOR CITIZENS (no subcategories)
             self.setGFormRadioButton(driver, "CLIENT CATEGORY", sector_value)
-            self.setGFormRadioButton(driver, "CLIENT SUB-CATEGORY", "NONE OF THE ABOVE")
+
+            self.setGFormRadioButton(driver, "CLIENT SUB-CATEGORY", "Visually impaired")
             # "Medical", "Burial", "Transportation", "Cash Support", "Food Subsidy"
             match self.financial_assist.GetStringSelection().lower():
                 case "medical":
@@ -2740,19 +2745,36 @@ class MyFrame(wx.Frame):
 # === wxPython UI ===
 class ActivationFrame(wx.Frame):
     def __init__(self, parent, app, title="Activate App"):
-        super().__init__(parent, title=title, size=(400, 150))
+        super().__init__(parent, title=title, size=(480, 230))
         self.app = app  # <-- store reference to MainApp
 
         panel = wx.Panel(self)
         vbox = wx.BoxSizer(wx.VERTICAL)
 
         # Info Text
+        info_device = wx.StaticText(panel, label="Device Id:")
+        vbox.Add(info_device, flag=wx.ALL, border=10)
+
+        self.label_text = get_device_id()
+        label = wx.StaticText(panel, label=self.label_text)
+        font = label.GetFont()
+        font.MakeBold()
+        label.SetFont(font)
+
+        # Change cursor to indicate clickable
+        label.SetCursor(wx.Cursor(wx.CURSOR_HAND))
+
+        # Bind mouse click event
+        label.Bind(wx.EVT_LEFT_DOWN, self.copy_to_clipboard)
+        vbox.Add(label, flag=wx.ALL, border=10)
+
+        # Info Text
         info_text = wx.StaticText(panel, label="License key:")
-        vbox.Add(info_text, flag=wx.ALL | wx.CENTER, border=10)
+        vbox.Add(info_text, flag=wx.ALL, border=10)
 
         # Key input field
         self.key_input = wx.TextCtrl(panel)
-        vbox.Add(self.key_input, flag=wx.EXPAND | wx.LEFT | wx.RIGHT, border=20)
+        vbox.Add(self.key_input, flag=wx.EXPAND | wx.LEFT | wx.RIGHT, border=10)
 
         # Activate button
         activate_btn = wx.Button(panel, label="Activate")
@@ -2767,6 +2789,15 @@ class ActivationFrame(wx.Frame):
 
         self.Centre()
         self.Show()
+
+    def copy_to_clipboard(self, event):
+        """Copies label text to the system clipboard."""
+        if wx.TheClipboard.Open():
+            wx.TheClipboard.SetData(wx.TextDataObject(self.label_text))
+            wx.TheClipboard.Close()
+            wx.MessageBox("Copied to clipboard!", "Success", wx.OK | wx.ICON_INFORMATION)
+        else:
+            wx.MessageBox("Unable to access clipboard.", "Error", wx.OK | wx.ICON_ERROR)
 
     def on_activate(self, event):
         """

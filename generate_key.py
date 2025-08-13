@@ -1,9 +1,11 @@
 from license import generate_trial_key
 
 if __name__ == "__main__":
+    deviceId = input("Enter Device Id: ").strip()
+    print(f"deviceId: {deviceId} ")
     # Trial keys
     for days in [1, 2, 3, 5, 7, 30]:
-        key = generate_trial_key(days)
+        key = generate_trial_key(days, deviceId)
         print(f"Trial {days} days key: {key}")
 
     # Lifetime key
