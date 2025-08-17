@@ -2024,7 +2024,7 @@ class MyFrame(wx.Frame):
             #     SENIOR CITIZENS (no subcategories)
             self.setGFormRadioButton(driver, "CLIENT CATEGORY", sector_value)
 
-            self.setGFormRadioButton(driver, "CLIENT SUB-CATEGORY", "Visually impaired")
+            self.setGFormRadioButton(driver, "CLIENT SUB-CATEGORY", "Indigenous People")
             # "Medical", "Burial", "Transportation", "Cash Support", "Food Subsidy"
             match self.financial_assist.GetStringSelection().lower():
                 case "medical":
