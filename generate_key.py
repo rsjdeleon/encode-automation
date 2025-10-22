@@ -11,7 +11,7 @@ if __name__ == "__main__":
             print(f"deviceId: {deviceIdArray[0]} ")
             print("-" * 100)
             # Trial keys
-            for days in [1, 2, 3, 5, 7, 14, 21, 30]:
+            for days in [1, 2, 3, 5, 7, 14, 15, 21, 30]:
                 key = generate_trial_key(days, deviceIdArray[0])
                 print(f"Trial {days} days key: {key}")
             print("-" * 100)

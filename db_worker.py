@@ -37,10 +37,10 @@ def get_worker_id(lastname, firstname, middlename):
             SELECT id, sw_lname, sw_fname, sw_mname, search_thru_first_name FROM worker 
             WHERE LOWER(TRIM(sw_lname)) = LOWER(TRIM(?))
               AND LOWER(TRIM(sw_fname)) = LOWER(TRIM(?))
-              AND (
-                sw_mname IS NULL AND ? IS NULL OR
-                LOWER(TRIM(sw_mname)) = LOWER(TRIM(?))
-              )
+                            AND (
+                                (sw_mname IS NULL AND ? IS NULL) OR
+                                LOWER(TRIM(sw_mname)) = LOWER(TRIM(?))
+                            )
             LIMIT 1;
             """
         cursor.execute(query, (lastname, firstname,  middlename, middlename))
@@ -54,7 +54,7 @@ def get_worker_by_id(id):
             FROM worker WHERE id = ?
             LIMIT 1;
             """
-        cursor.execute(query, (id))
+        cursor.execute(query, (id,))
         return cursor.fetchone()
 
 def delete_worker_by_id(id):

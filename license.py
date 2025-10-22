@@ -111,7 +111,7 @@ def activate_trial(input_key):
         return True
 
     # Otherwise check for trial keys (1, 2, 3, 5, 7, 30 days)
-    for days in [1, 2, 3, 5, 7, 14, 21, 30]:
+    for days in [1, 2, 3, 5, 7, 14, 15, 21, 30]:
         expected_key = generate_trial_key(days, device_id)
         if input_key == expected_key:
             expire_date = (datetime.datetime.now() + datetime.timedelta(days=days)).strftime("%Y-%m-%d")
