@@ -1,5 +1,4 @@
-import wx
-import wx.adv
+import sys
 import time
 import threading
 import os
@@ -14,6 +13,17 @@ from datetime import datetime
 from selenium import webdriver
 from selenium.common import NoSuchElementException
 from selenium.webdriver.common.by import By
+
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QDialog, QVBoxLayout, QHBoxLayout,
+    QLabel, QLineEdit, QPushButton, QCheckBox, QComboBox, QTabWidget,
+    QScrollArea, QTableWidget, QTableWidgetItem, QTextEdit, QFrame,
+    QMessageBox, QSizePolicy, QHeaderView,
+)
+from PySide6.QtCore import Qt, QDate, Signal, QObject, QTimer
+from PySide6.QtGui import QColor, QFont, QCursor
+
+from widgets import AllCapsLineEdit, NoScrollComboBox
 
 from utilities import is_similar
 from utilities import get_date_value
@@ -48,6 +58,11 @@ from config import client_sub_category
 from license import is_trial_valid, activate_trial, get_device_id
 import winsound
 import keyboard
+
+# Backward-compatible aliases within this file
+AllCapsTextCtrl = AllCapsLineEdit
+AllTextCtrl = QLineEdit
+
 
 # Initialize SQLite database
 def init_db():
@@ -89,528 +104,326 @@ def export_sqlite_to_csv(db_path, table_name, csv_path):
     finally:
         conn.close()
 
-class AllCapsTextCtrl(wx.TextCtrl):
-    def __init__(self, parent, *args, **kwargs):
-        super(AllCapsTextCtrl, self).__init__(parent, *args, **kwargs)
-        self.Bind(wx.EVT_TEXT, self.on_text_change)
 
-    def on_text_change(self, event):
-        value = self.GetValue()
-        if value != value.upper():
-            # Prevent cursor jumping by remembering position
-            pos = self.GetInsertionPoint()
-            self.ChangeValue(value.upper())
-            self.SetInsertionPoint(pos)
-        event.Skip()  # Allow other handlers
-
-class AllTextCtrl(wx.TextCtrl):
-    def __init__(self, parent, *args, **kwargs):
-        super(AllTextCtrl, self).__init__(parent, *args, **kwargs)      
-
-class MyFrame(wx.Frame):
+class MyFrame(QMainWindow):
     row_data = {}  # ID -> full data
     row_data_sw = {}  # ID -> full data
 
-
+    # Thread-safe UI signals
+    _sig_log = Signal(str)
+    _sig_set_running = Signal(bool)
+    _sig_reload_person = Signal()
+    _sig_select_first = Signal()
+    _sig_msg_box = Signal(str, str, str)  # title, message, kind (info/error)
 
     def load_data_worker(self):
-        self.selected_worker_id = self.list_ctrl_worker.GetFirstSelected()
-        self.list_ctrl_worker.DeleteAllItems()
+        selected_rows = self.list_ctrl_worker.selectedItems()
+        self.selected_worker_id = int(selected_rows[0].text()) if selected_rows else None
+        self.list_ctrl_worker.setRowCount(0)
         for row in get_all_workers():
-            index = self.list_ctrl_worker.InsertItem(self.list_ctrl_worker.GetItemCount(), str(row[0]))
-            self.list_ctrl_worker.SetItem(index, 1, row[1])
-            self.list_ctrl_worker.SetItem(index, 2, str(row[2]))
-            self.list_ctrl_worker.SetItem(index, 3, str(row[3]))
-            self.list_ctrl_worker.SetItem(index, 4, str(row[4]))
-
-            # Optionally store a reference map if needed
+            r = self.list_ctrl_worker.rowCount()
+            self.list_ctrl_worker.insertRow(r)
+            for col, val in enumerate(row):
+                self.list_ctrl_worker.setItem(r, col, QTableWidgetItem(str(val)))
             self.row_data_sw[row[0]] = {
-                "id": row[0],
-                "sw_lname": row[1],
-                "sw_fname": row[2],
-                "sw_mname": row[3],
-                "search_thru_first_name": row[4],
+                "id": row[0], "sw_lname": row[1], "sw_fname": row[2],
+                "sw_mname": row[3], "search_thru_first_name": row[4],
             }
 
-    def on_add_worker(self, event):
-        dialog = wx.MessageDialog(
-            self,
-            "Are you sure you want to add?",
-            "Add",
-            style=wx.YES_NO | wx.ICON_QUESTION
-        )
-        result = dialog.ShowModal()
-        if result == wx.ID_YES:
+    def on_add_worker(self, event=None):
+        reply = QMessageBox.question(self, "Add", "Are you sure you want to add?",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
             if insert_worker(
-                    self.sw_last_name.GetValue(),
-                    self.sw_first_name.GetValue(),
-                    self.sw_middle_name.GetValue(),
-                    self.sw_thru_first_name.GetValue()
+                self.sw_last_name.text(), self.sw_first_name.text(),
+                self.sw_middle_name.text(), self.sw_thru_first_name.isChecked()
             ):
                 self.load_data_worker()
                 self.reload_choice_items()
             else:
-                wx.MessageBox("Record already exist.", "Error", wx.OK | wx.ICON_ERROR)
+                QMessageBox.critical(self, "Error", "Record already exist.")
 
-        dialog.Destroy()
-
-    def on_update_worker(self, event):
-        dialog = wx.MessageDialog(
-            self,
-            "Are you sure you want to update ?",
-            "Update",
-            style=wx.YES_NO | wx.ICON_QUESTION
-        )
-        result = dialog.ShowModal()
-
-        if result == wx.ID_YES:
-            """Updates the selected record"""
+    def on_update_worker(self, event=None):
+        reply = QMessageBox.question(self, "Update", "Are you sure you want to update?",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
             if self.selected_worker_id:
                 update_worker(
                     self.selected_worker_id,
-                    self.sw_last_name.GetValue(),
-                    self.sw_first_name.GetValue(),
-                    self.sw_middle_name.GetValue(),
-                    self.sw_thru_first_name.GetValue()
+                    self.sw_last_name.text(), self.sw_first_name.text(),
+                    self.sw_middle_name.text(), self.sw_thru_first_name.isChecked()
                 )
                 self.load_data_worker()
                 self.reload_choice_items()
 
-        dialog.Destroy()
-
-    def on_delete_worker(self, event):
-        dialog = wx.MessageDialog(
-            self,
-            "Are you sure you want to delete?",
-            "Delete",
-            style=wx.YES_NO | wx.ICON_QUESTION
-        )
-        result = dialog.ShowModal()
-
-        if result == wx.ID_YES:
-            """Deletes the selected record"""
+    def on_delete_worker(self, event=None):
+        reply = QMessageBox.question(self, "Delete", "Are you sure you want to delete?",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
             if self.selected_worker_id:
                 delete_worker_by_id(self.selected_worker_id)
                 self.load_data_worker()
                 self.reload_choice_items()
 
-        dialog.Destroy()
-
-    def on_select_worker(self, event):
-        index = event.GetIndex()
-        self.selected_worker_id = int(self.list_ctrl_worker.GetItemText(index))
-        if self.selected_worker_id in self.row_data_sw:
-            worker = self.row_data_sw[self.selected_worker_id]
+    def on_select_worker(self):
+        selected = self.list_ctrl_worker.selectedItems()
+        if not selected:
+            return
+        row = self.list_ctrl_worker.currentRow()
+        worker_id = int(self.list_ctrl_worker.item(row, 0).text())
+        if worker_id in self.row_data_sw:
+            worker = self.row_data_sw[worker_id]
             self.selected_worker_id = worker["id"]
-
-            self.sw_last_name.SetValue(worker["sw_lname"])
-            self.sw_first_name.SetValue(worker["sw_fname"])
-            self.sw_middle_name.SetValue(worker["sw_mname"])
-            self.sw_thru_first_name.SetValue(worker["search_thru_first_name"])
+            self.sw_last_name.setText(worker["sw_lname"])
+            self.sw_first_name.setText(worker["sw_fname"])
+            self.sw_middle_name.setText(worker["sw_mname"])
+            self.sw_thru_first_name.setChecked(bool(worker["search_thru_first_name"]))
 
     def load_data_person(self):
-        is_encoded = "1" if self.cb_encoded.GetValue() else "0"
-        selected_index = self.list_ctrl.GetFirstSelected()
-        self.list_ctrl.DeleteAllItems()
+        is_encoded = "1" if self.cb_encoded.isChecked() else "0"
+        selected_row = self.list_ctrl.currentRow()
+        self.list_ctrl.setRowCount(0)
+        self.row_data.clear()
 
-        # Assign a color per unique SW value
         sw_color_map = {}
         sw_column_index = 7
+        assist_map = {0: "Medical", 1: "Burial", 2: "Transportation", 3: "Cash Support", 4: "Food"}
 
-        all_persons = get_all_person_by_encoded(is_encoded)
-        for row in all_persons:
+        for row in get_all_person_by_encoded(is_encoded):
             sw_value = row[sw_column_index]
             if sw_value not in sw_color_map:
-                sw_color_map[sw_value] = wx.Colour(
+                sw_color_map[sw_value] = QColor(
                     random.randint(180, 255),
                     random.randint(200, 255),
                     random.randint(180, 255)
                 )
 
-            assist = ""
-            if row[4] == 0 :
-                assist = "Medical"
-            elif row[4] == 1 :
-                assist = "Burial"
-            elif row[4] == 2:
-                assist = "Transportation"
-            elif row[4] == 3:
-                assist = "Cash Support"
-            elif row[4] == 4:
-                assist = "Food"
+            assist = assist_map.get(row[4], "")
+            r = self.list_ctrl.rowCount()
+            self.list_ctrl.insertRow(r)
+            for col, val in enumerate([
+                str(row[0]), row[12], str(row[13]), str(row[14]), str(row[15]),
+                str(row[17]), str(row[18]), assist, str(row[5]), str(row[7]), str(row[38])
+            ]):
+                item = QTableWidgetItem(val)
+                self.list_ctrl.setItem(r, col, item)
 
-            index = self.list_ctrl.InsertItem(self.list_ctrl.GetItemCount(), str(row[0]))
-            self.list_ctrl.SetItem(index, 1, row[12])
-            self.list_ctrl.SetItem(index, 2, str(row[13]))
-            self.list_ctrl.SetItem(index, 3, str(row[14]))
-            self.list_ctrl.SetItem(index, 4, str(row[15]))
-            self.list_ctrl.SetItem(index, 5, str(row[17]))
-            self.list_ctrl.SetItem(index, 6, str(row[18]))
-            self.list_ctrl.SetItem(index, 7, str(assist))
-            self.list_ctrl.SetItem(index, 8, str(row[5]))
-            self.list_ctrl.SetItem(index, 9, str(row[7]))
-            self.list_ctrl.SetItem(index, 10, str(row[38]))
-
-            self.list_ctrl.SetItemBackgroundColour(index, sw_color_map[sw_value])
-
+            # Row color
+            bg = sw_color_map[sw_value]
             if row[40] == 1:
-                self.list_ctrl.SetItemBackgroundColour(index, wx.Colour(255, 0, 0))
+                bg = QColor(255, 0, 0)
+            for col in range(self.list_ctrl.columnCount()):
+                self.list_ctrl.item(r, col).setBackground(bg)
+                if row[37] == 1:
+                    self.list_ctrl.item(r, col).setForeground(QColor(0, 0, 255))
 
-            if row[37]== 1:
-                self.list_ctrl.SetItemTextColour(index, wx.Colour(0, 0, 255))
-
-            # Optionally store a reference map if needed
             self.row_data[row[0]] = {
-                "id": row[0],
-                "encoder_name": row[1],
-                "date_encoded": row[2],
-                "target_sector": row[3],
-                "financial_assist": row[4],
-                "amount": row[5],
-                "fund_source": row[6],
-                "sw_lname": row[7],
-                "sw_fname": row[8],
-                "sw_mname": row[9],
-                "interview_date": row[10],
-                "client_relationship": row[11],
-                "client_lastname": row[12],
-                "client_firstname": row[13],
-                "client_middlename": row[14],
-                "client_ext": row[15],
-                "client_gender": row[16],
-                "client_bday": row[17],
-                "client_age": row[18],
-                "client_contact_no": row[19],
-                "client_civil_status": row[20],
-                "client_house_street": row[21],
-                "client_barangay": row[22],
-                "client_city": row[23],
-                "bene_relationship": row[24],
-                "bene_lastname": row[25],
-                "bene_firstname": row[26],
-                "bene_middlename": row[27],
-                "bene_ext": row[28],
-                "bene_gender": row[29],
-                "bene_bday": row[30],
-                "bene_age": row[31],
-                "bene_contact_no": row[32],
-                "bene_civil_status": row[33],
-                "bene_house_street": row[34],
-                "bene_barangay": row[35],
-                "bene_city": row[36],
-                "has_beneficiary": row[37],
-                "encoded": row[38],
-                "target_sector_bene": row[39],
-                "mode_release": row[40],
-                "approved_by": row[41],
+                "id": row[0], "encoder_name": row[1], "date_encoded": row[2],
+                "target_sector": row[3], "financial_assist": row[4], "amount": row[5],
+                "fund_source": row[6], "sw_lname": row[7], "sw_fname": row[8],
+                "sw_mname": row[9], "interview_date": row[10], "client_relationship": row[11],
+                "client_lastname": row[12], "client_firstname": row[13], "client_middlename": row[14],
+                "client_ext": row[15], "client_gender": row[16], "client_bday": row[17],
+                "client_age": row[18], "client_contact_no": row[19], "client_civil_status": row[20],
+                "client_house_street": row[21], "client_barangay": row[22], "client_city": row[23],
+                "bene_relationship": row[24], "bene_lastname": row[25], "bene_firstname": row[26],
+                "bene_middlename": row[27], "bene_ext": row[28], "bene_gender": row[29],
+                "bene_bday": row[30], "bene_age": row[31], "bene_contact_no": row[32],
+                "bene_civil_status": row[33], "bene_house_street": row[34], "bene_barangay": row[35],
+                "bene_city": row[36], "has_beneficiary": row[37], "encoded": row[38],
+                "target_sector_bene": row[39], "mode_release": row[40], "approved_by": row[41],
                 "sub_category": row[42],
             }
 
-            if 0 <= selected_index < self.list_ctrl.GetItemCount():
-                self.list_ctrl.Select(selected_index)
-                self.list_ctrl.Focus(selected_index)
+        if 0 <= selected_row < self.list_ctrl.rowCount():
+            self.list_ctrl.selectRow(selected_row)
 
     def select_first_item(self):
-        # Select first item if list has records
-        if self.list_ctrl.GetItemCount() > 0:
-            self.list_ctrl.Select(0, True)  # Selects the first item
-            self.list_ctrl.Focus(0)  # Focuses the first item for keyboard interaction
+        if self.list_ctrl.rowCount() > 0:
+            self.list_ctrl.selectRow(0)
 
     def on_add_person(self, event=None):
-        dialog = wx.MessageDialog(
-            self,
-            "Are you sure you want to add ?",
-            "Add Person",
-            style=wx.YES_NO | wx.ICON_QUESTION
-        )
-        result = dialog.ShowModal()
-
-        if result == wx.ID_YES:
-            """Handles adding a new record"""
-            cl_bday = self.client_bday.GetValue()
-            cl_bday = cl_bday.FormatISODate()
-            be_bday = self.bene_bday.GetValue()
-            be_bday = be_bday.FormatISODate()
-            date_encoded_val = self.encoded_date.GetValue()
-            date_encoded_val = date_encoded_val.FormatISODate()
-            date_interview_val = self.interview_date.GetValue()
-            date_interview_val = date_interview_val.FormatISODate()
+        reply = QMessageBox.question(self, "Add Person", "Are you sure you want to add?",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
             if insert_person(
-                self.encoder_name.GetValue(),
-                date_encoded_val,
-
-                self.target_sector.GetSelection(),
-                self.target_sector_bene.GetSelection(),
-                self.financial_assist.GetSelection(),
-                self.amount.GetValue(),
-                self.fund_source.GetSelection(),
-                self.sw_lname.GetValue(),
-                self.sw_fname.GetValue(),
-                self.sw_mname.GetValue(),
-                date_interview_val,
-
-                self.client_relationship.GetSelection(),
-
-                self.client_lastname.GetValue(),
-                self.client_firstname.GetValue(),
-                self.client_middlename.GetValue(),
-
-                self.client_ext.GetValue(),
-
-                self.client_gender.GetSelection(),
-
-                cl_bday,
-                self.client_age.GetValue(),
-
-                self.client_contact_no.GetValue(),
-                self.client_civil_status.GetSelection(),
-
-                self.client_house_street.GetValue(),
-                self.client_barangay.GetValue(),
-                self.client_city.GetSelection(),
-
-                # Bene
-                self.bene_relationship.GetSelection(),
-
-                self.bene_lastname.GetValue(),
-                self.bene_firstname.GetValue(),
-                self.bene_middlename.GetValue(),
-                self.bene_ext.GetValue(),
-
-                self.bene_gender.GetSelection(),
-
-                be_bday,
-                self.bene_age.GetValue(),
-
-                self.bene_contact_no.GetValue(),
-                self.bene_civil_status.GetSelection(),
-
-                self.bene_house_street.GetValue(),
-                self.bene_barangay.GetValue(),
-                self.bene_city.GetSelection(),
-
-                self.has_beneficiary.GetValue(),
-                self.mode_release.GetSelection(),
-                self.approved_by.GetSelection(),
-                self.sub_category.GetSelection(),
+                self.encoder_name.text(),
+                get_date_value(self.encoded_date),
+                self.target_sector.currentIndex(),
+                self.target_sector_bene.currentIndex(),
+                self.financial_assist.currentIndex(),
+                self.amount.text(),
+                self.fund_source.currentIndex(),
+                self.sw_lname.text(), self.sw_fname.text(), self.sw_mname.text(),
+                get_date_value(self.interview_date),
+                self.client_relationship.currentIndex(),
+                self.client_lastname.text(), self.client_firstname.text(),
+                self.client_middlename.text(), self.client_ext.text(),
+                self.client_gender.currentIndex(),
+                get_date_value(self.client_bday), self.client_age.text(),
+                self.client_contact_no.text(),
+                self.client_civil_status.currentIndex(),
+                self.client_house_street.text(), self.client_barangay.text(),
+                self.client_city.currentIndex(),
+                self.bene_relationship.currentIndex(),
+                self.bene_lastname.text(), self.bene_firstname.text(),
+                self.bene_middlename.text(), self.bene_ext.text(),
+                self.bene_gender.currentIndex(),
+                get_date_value(self.bene_bday), self.bene_age.text(),
+                self.bene_contact_no.text(),
+                self.bene_civil_status.currentIndex(),
+                self.bene_house_street.text(), self.bene_barangay.text(),
+                self.bene_city.currentIndex(),
+                self.has_beneficiary.isChecked(),
+                self.mode_release.currentIndex(),
+                self.approved_by.currentIndex(),
+                self.sub_category.currentIndex(),
             ):
                 self.load_data_person()
                 self.on_clear(None)
-                
             else:
-                wx.MessageBox("Record already exist.", "Error", wx.OK | wx.ICON_ERROR)
+                QMessageBox.critical(self, "Error", "Record already exist.")
+        QTimer.singleShot(0, self.client_lastname.setFocus)
 
-        dialog.Destroy()
-
-        wx.CallAfter(self.client_lastname.SetFocus)
-        wx.CallAfter(self.client_lastname.SetInsertionPointEnd)
-        wx.CallAfter(self.client_lastname.SetSelection, -1, -1)
-        
-
-    def on_update_person(self, event):
-        dialog = wx.MessageDialog(
-            self,
-            "Are you sure you want to update ?",
-            "Update",
-            style=wx.YES_NO | wx.ICON_QUESTION
-        )
-        result = dialog.ShowModal()
-
-        if result == wx.ID_YES:
-            """Updates the selected record"""
+    def on_update_person(self, event=None):
+        reply = QMessageBox.question(self, "Update", "Are you sure you want to update?",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
             if self.selected_person_id:
-                cl_bday = self.client_bday.GetValue()
-                cl_bday = cl_bday.FormatISODate()
-                be_bday = self.bene_bday.GetValue()
-                be_bday = be_bday.FormatISODate()
-                date_encoded_val = self.encoded_date.GetValue()
-                date_encoded_val = date_encoded_val.FormatISODate()
-                date_interview_val = self.interview_date.GetValue()
-                date_interview_val = date_interview_val.FormatISODate()
                 update_person(
                     self.selected_person_id,
-                    self.encoder_name.GetValue(),
-                    date_encoded_val,
-
-                    self.target_sector_bene.GetSelection(),
-                    self.target_sector.GetSelection(),
-                    self.financial_assist.GetSelection(),
-                    self.amount.GetValue(),
-                    self.fund_source.GetSelection(),
-                    self.sw_lname.GetValue(),
-                    self.sw_fname.GetValue(),
-                    self.sw_mname.GetValue(),
-                    date_interview_val,
-
-                    self.client_relationship.GetSelection(),
-
-                    self.client_lastname.GetValue(),
-                    self.client_firstname.GetValue(),
-                    self.client_middlename.GetValue(),
-
-                    self.client_ext.GetValue(),
-
-                    self.client_gender.GetSelection(),
-
-                    cl_bday,
-                    self.client_age.GetValue(),
-
-                    self.client_contact_no.GetValue(),
-                    self.client_civil_status.GetSelection(),
-
-                    self.client_house_street.GetValue(),
-                    self.client_barangay.GetValue(),
-                    self.client_city.GetSelection(),
-
-                    # Bene
-                    self.bene_relationship.GetSelection(),
-
-                    self.bene_lastname.GetValue(),
-                    self.bene_firstname.GetValue(),
-                    self.bene_middlename.GetValue(),
-                    self.bene_ext.GetValue(),
-
-                    self.bene_gender.GetSelection(),
-
-                    be_bday,
-                    self.bene_age.GetValue(),
-
-                    self.bene_contact_no.GetValue(),
-                    self.bene_civil_status.GetSelection(),
-
-                    self.bene_house_street.GetValue(),
-                    self.bene_barangay.GetValue(),
-                    self.bene_city.GetSelection(),
-
-                    self.has_beneficiary.GetValue(),
-                    self.mode_release.GetSelection(),
-                    self.approved_by.GetSelection(),
-                    self.sub_category.GetSelection(),
+                    self.encoder_name.text(),
+                    get_date_value(self.encoded_date),
+                    self.target_sector_bene.currentIndex(),
+                    self.target_sector.currentIndex(),
+                    self.financial_assist.currentIndex(),
+                    self.amount.text(),
+                    self.fund_source.currentIndex(),
+                    self.sw_lname.text(), self.sw_fname.text(), self.sw_mname.text(),
+                    get_date_value(self.interview_date),
+                    self.client_relationship.currentIndex(),
+                    self.client_lastname.text(), self.client_firstname.text(),
+                    self.client_middlename.text(), self.client_ext.text(),
+                    self.client_gender.currentIndex(),
+                    get_date_value(self.client_bday), self.client_age.text(),
+                    self.client_contact_no.text(),
+                    self.client_civil_status.currentIndex(),
+                    self.client_house_street.text(), self.client_barangay.text(),
+                    self.client_city.currentIndex(),
+                    self.bene_relationship.currentIndex(),
+                    self.bene_lastname.text(), self.bene_firstname.text(),
+                    self.bene_middlename.text(), self.bene_ext.text(),
+                    self.bene_gender.currentIndex(),
+                    get_date_value(self.bene_bday), self.bene_age.text(),
+                    self.bene_contact_no.text(),
+                    self.bene_civil_status.currentIndex(),
+                    self.bene_house_street.text(), self.bene_barangay.text(),
+                    self.bene_city.currentIndex(),
+                    self.has_beneficiary.isChecked(),
+                    self.mode_release.currentIndex(),
+                    self.approved_by.currentIndex(),
+                    self.sub_category.currentIndex(),
                 )
                 self.load_data_person()
                 self.on_clear(None)
 
-        dialog.Destroy()
-
-    def on_delete_person(self, event):
-        dialog = wx.MessageDialog(
-            self,
-            "Are you sure you want to delete?",
-            "Delete",
-            style=wx.YES_NO | wx.ICON_QUESTION
-        )
-        result = dialog.ShowModal()
-
-        if result == wx.ID_YES:
-            """Deletes the selected record"""
+    def on_delete_person(self, event=None):
+        reply = QMessageBox.question(self, "Delete", "Are you sure you want to delete?",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
             if self.selected_person_id:
                 delete_person_by_id(self.selected_person_id)
                 self.load_data_person()
                 self.on_clear(None)
 
-        dialog.Destroy()
-
-    def on_set_encoded(self, event):
-        dialog = wx.MessageDialog(
-            self,
-            "Do you want to continue?",
-            "Confirm Action",
-            style=wx.YES_NO | wx.ICON_QUESTION
-        )
-        result = dialog.ShowModal()
-
-        if result == wx.ID_YES:
+    def on_set_encoded(self, event=None):
+        reply = QMessageBox.question(self, "Confirm Action", "Do you want to continue?",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
             if self.selected_person_id:
-                
-                set_encoded(self.encode_id.GetValue(), not self.cb_encoded.GetValue())
+                set_encoded(self.encode_id.text(), not self.cb_encoded.isChecked())
                 self.load_data_person()
                 self.select_first_item()
 
-        dialog.Destroy()
-
-    def on_stop(self, event):
+    def on_stop(self, event=None):
         self.stop_requested = True
 
-    def on_auto_fill(self, event):
+    def on_auto_fill(self, event=None):
         self.is_auto_fill = True
-        self.on_button_click(event)
-        # self.on_fill_up()
+        self.on_button_click()
 
-    def on_clear(self, event):
+    def on_clear(self, event=None):
         self.selected_person_id = None
 
-    def on_select_person(self, event):
-        index = event.GetIndex()
-        self.selected_person_id = int(self.list_ctrl.GetItemText(index))
+    def on_select_person(self):
+        selected = self.list_ctrl.selectedItems()
+        if not selected:
+            return
+        row = self.list_ctrl.currentRow()
+        person_id = int(self.list_ctrl.item(row, 0).text())
+        if person_id not in self.row_data:
+            return
+        person = self.row_data[person_id]
+        self.selected_person_id = person["id"]
+        self.encode_id.setText(str(person["id"]))
 
-        if self.selected_person_id in self.row_data:
-            person = self.row_data[self.selected_person_id]
-            self.selected_person_id = person["id"]
-            self.encode_id.SetValue(str(person["id"]))
+        self.client_lastname.setText(person["client_lastname"])
+        self.client_firstname.setText(person["client_firstname"])
+        self.client_middlename.setText(person["client_middlename"])
+        self.client_age.setText(str(person["client_age"]))
+        self.client_ext.setText(person["client_ext"])
+        self.client_relationship.setCurrentIndex(person["client_relationship"])
+        self.client_gender.setCurrentIndex(person["client_gender"])
+        self.client_civil_status.setCurrentIndex(person["client_civil_status"])
+        set_date_value(self.client_bday, person["client_bday"])
+        self.client_contact_no.setText(person["client_contact_no"])
+        self.client_house_street.setText(person["client_house_street"])
+        self.client_barangay.setText(person["client_barangay"])
+        self.client_city.setCurrentIndex(person["client_city"])
+        self.target_sector.setCurrentIndex(person["target_sector"])
 
-            self.client_lastname.SetValue(person["client_lastname"])
-            self.client_firstname.SetValue(person["client_firstname"])
-            self.client_middlename.SetValue(person["client_middlename"])
+        self.bene_lastname.setText(person["bene_lastname"])
+        self.bene_firstname.setText(person["bene_firstname"])
+        self.bene_middlename.setText(person["bene_middlename"])
+        self.bene_age.setText(str(person["bene_age"]))
+        self.bene_ext.setText(person["bene_ext"])
+        self.bene_relationship.setCurrentIndex(person["bene_relationship"])
+        self.bene_gender.setCurrentIndex(person["bene_gender"])
+        self.bene_civil_status.setCurrentIndex(person["bene_civil_status"])
+        set_date_value(self.bene_bday, person["bene_bday"])
+        self.bene_contact_no.setText(person["bene_contact_no"])
+        self.bene_house_street.setText(person["bene_house_street"])
+        self.bene_barangay.setText(person["bene_barangay"])
+        self.bene_city.setCurrentIndex(person["bene_city"])
 
-            self.client_age.SetValue(str(person["client_age"]))
-            self.client_ext.SetValue(person["client_ext"])
-            self.client_relationship.SetSelection(person["client_relationship"])
-            self.client_gender.SetSelection(person["client_gender"])
-            self.client_civil_status.SetSelection(person["client_civil_status"])
-            set_date_value(self.client_bday, person["client_bday"])
-            self.client_contact_no.SetValue(person["client_contact_no"])
-            self.client_house_street.SetValue(person["client_house_street"])
-            self.client_barangay.SetValue(person["client_barangay"])
-            self.client_city.SetSelection(person["client_city"])
-            self.target_sector.SetSelection(person["target_sector"])
+        self.financial_assist.setCurrentIndex(person["financial_assist"])
+        self.mode_release.setCurrentIndex(person["mode_release"])
+        self.approved_by.setCurrentIndex(person["approved_by"])
+        self.sub_category.setCurrentIndex(person["sub_category"])
+        self.amount.setText(person["amount"])
+        self.fund_source.setCurrentIndex(person["fund_source"])
+        self.sw_lname.setText(person["sw_lname"])
+        self.sw_fname.setText(person["sw_fname"])
+        self.sw_mname.setText(person["sw_mname"])
+        set_date_value(self.interview_date, person["interview_date"])
+        self.has_beneficiary.setChecked(bool(person["has_beneficiary"]))
+        self.sw_last_name.setText(person["sw_lname"])
+        self.sw_first_name.setText(person["sw_fname"])
+        self.sw_middle_name.setText(person["sw_mname"])
 
-            self.bene_lastname.SetValue(person["bene_lastname"])
-            self.bene_firstname.SetValue(person["bene_firstname"])
-            self.bene_middlename.SetValue(person["bene_middlename"])
-
-            self.bene_age.SetValue(str(person["bene_age"]))
-            self.bene_ext.SetValue(person["bene_ext"])
-            self.bene_relationship.SetSelection(person["bene_relationship"])
-            self.bene_gender.SetSelection(person["bene_gender"])
-            self.bene_civil_status.SetSelection(person["bene_civil_status"])
-            set_date_value(self.bene_bday, person["bene_bday"])
-            self.bene_contact_no.SetValue(person["bene_contact_no"])
-            self.bene_house_street.SetValue(person["bene_house_street"])
-            self.bene_barangay.SetValue(person["bene_barangay"])
-            self.bene_city.SetSelection(person["bene_city"])
-
-            self.target_sector.SetSelection(person["target_sector"])
-            self.financial_assist.SetSelection(person["financial_assist"])
-            self.mode_release.SetSelection(person["mode_release"])
-
-            self.approved_by.SetSelection(person["approved_by"])
-
-            self.sub_category.SetSelection(person["sub_category"])
-            
-            self.amount.SetValue(person["amount"])
-            self.fund_source.SetSelection(person["fund_source"])
-            self.sw_lname.SetValue(person["sw_lname"])
-            self.sw_fname.SetValue(person["sw_fname"])
-            self.sw_mname.SetValue(person["sw_mname"])
-            set_date_value(self.interview_date, person["interview_date"])
-
-            self.has_beneficiary.SetValue(person["has_beneficiary"])
-
-            self.sw_last_name.SetValue(person["sw_lname"])
-            self.sw_first_name.SetValue(person["sw_fname"])
-            self.sw_middle_name.SetValue(person["sw_mname"])
-
-            data_id = get_worker_id(person["sw_lname"], person["sw_fname"], person["sw_mname"])
-            if data_id:
-                for index, (id_value, lname, fname, mname, thru) in enumerate(self.social_worker_list):
-                    if id_value == data_id[0]:
-                        self.social_worker.SetSelection(index)
-                        break
-            else:
-                self.social_worker.SetSelection(-1)
+        data_id = get_worker_id(person["sw_lname"], person["sw_fname"], person["sw_mname"])
+        if data_id:
+            for index, (id_value, lname, fname, mname, thru) in enumerate(self.social_worker_list):
+                if id_value == data_id[0]:
+                    self.social_worker.setCurrentIndex(index)
+                    break
+        else:
+            self.social_worker.setCurrentIndex(-1)
 
     def __init__(self):
-        super().__init__(None, title="Client Assistance Form", size=(700, 700))
+        super().__init__()
+        self.setWindowTitle("Client Assistance Form")
+        self.resize(700, 700)
 
         self.selected_person_id = None
         self.selected_worker_id = None
@@ -622,732 +435,579 @@ class MyFrame(wx.Frame):
 
         keyboard.add_hotkey('shift+enter', self.on_add_person)
 
-        panel = wx.Panel(self)
-        self.sizer = wx.BoxSizer(wx.VERTICAL)
+        central = QWidget()
+        self.setCentralWidget(central)
+        self.sizer = QVBoxLayout(central)
 
-        # Scrollable Panel
-        scroll = wx.ScrolledWindow(panel, style=wx.VSCROLL)
-        scroll.SetScrollRate(5, 5)
-        self.scroll_sizer = wx.BoxSizer(wx.VERTICAL)
+        # ── Scrollable area ──────────────────────────────────────────────
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_widget = QWidget()
+        self.scroll_sizer = QVBoxLayout(scroll_widget)
+        scroll_area.setWidget(scroll_widget)
 
-        # Encoding Forms
-        self.fill_forms_btn = wx.Button(panel, label="Fill Form")
-        self.fill_forms_btn.Bind(wx.EVT_BUTTON, self.on_button_click)
+        # ── Tab Widget ───────────────────────────────────────────────────
+        notebook = QTabWidget()
 
-        # self.clear_all_btn = wx.Button(panel, label="Clear All")
-        # self.clear_all_btn.Bind(wx.EVT_BUTTON, self.on_button_clear_all)
+        client_panel = QWidget()
+        bene_panel = QWidget()
+        sw_panel = QWidget()
 
-        self.save_btn = wx.Button(panel, label="Save")
-        self.save_btn.Bind(wx.EVT_BUTTON, self.on_button_save)
-        self.save_btn.Hide()
+        box_sizer_client = QVBoxLayout(client_panel)
+        box_sizer_bene = QVBoxLayout(bene_panel)
+        box_sizer_sw = QVBoxLayout(sw_panel)
 
-        self.refresh_btn = wx.Button(panel, label="Refresh")
-        self.refresh_btn.Bind(wx.EVT_BUTTON, self.on_refresh)
-
-        # Create Checkboxes
-        self.cb_website = wx.CheckBox(panel, label="WEB")
-        self.cb_offline = wx.CheckBox(panel, label="OFF")
-        self.cb_mov = wx.CheckBox(panel, label="MOV")
-
-        # Buttons
-        option_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        option_sizer.Add(self.cb_website, 1,  wx.EXPAND, 5)
-        option_sizer.Add(self.cb_offline, 1,  wx.EXPAND, 5)
-        option_sizer.Add(self.cb_mov, 1, wx.EXPAND, 5)
-
-
-
-        # Create a notebook (tab panel) inside the scrolled window
-        notebook = wx.Notebook(scroll)
-
-        # Create some panels for the tabs
-        client_panel = wx.Panel(notebook)
-        bene_panel = wx.Panel(notebook)
-        sw_panel = wx.Panel(notebook)
-
-        # # Create a BoxSizer with a horizontal layout inside each tab
-        box_sizer_client = wx.BoxSizer(wx.VERTICAL)
-        box_sizer_bene = wx.BoxSizer(wx.VERTICAL)
-        box_sizer_sw = wx.BoxSizer(wx.VERTICAL)
-
-        # Beneficiary Checkbox
-        self.has_beneficiary = wx.CheckBox(client_panel, label="Has Beneficiary")
-        self.has_beneficiary.Bind(wx.EVT_CHECKBOX, self.has_beneficiary_event)
-        box_sizer_client.Add(self.has_beneficiary, 0, wx.ALL | wx.EXPAND, 5)
+        # ── Client Tab ───────────────────────────────────────────────────
+        self.has_beneficiary = QCheckBox("Has Beneficiary")
+        self.has_beneficiary.stateChanged.connect(self.has_beneficiary_event)
+        box_sizer_client.addWidget(self.has_beneficiary)
 
         self.relationship_choices = [name for _, name in relationship_list]
         self.relationship_data_map = {value: name for name, value in relationship_list}
 
-        self.client_relationship = wx.Choice(client_panel, choices=self.relationship_choices)
-        box_sizer_client.Add(wx.StaticText(client_panel, label="Relationship to bene:"), 0, wx.ALL, 5)
-        box_sizer_client.Add(self.client_relationship, 0, wx.ALL | wx.EXPAND, 5)
+        box_sizer_client.addWidget(QLabel("Relationship to bene:"))
+        self.client_relationship = NoScrollComboBox()
+        self.client_relationship.addItems(self.relationship_choices)
+        box_sizer_client.addWidget(self.client_relationship)
 
-        self.client_lastname = AllCapsTextCtrl(client_panel, style=wx.TE_PROCESS_ENTER)
-        self.client_lastname.SetHint("Lastname")
-        cl_fullname_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        cl_fullname_sizer.Add(self.client_lastname, 1, wx.EXPAND, 5)
-        cl_fullname_sizer.AddSpacer(10)
+        box_sizer_client.addWidget(QLabel("Fullname:"))
+        cl_fullname_sizer = QHBoxLayout()
+        self.client_lastname = AllCapsLineEdit()
+        self.client_lastname.setPlaceholderText("Lastname")
+        self.client_firstname = AllCapsLineEdit()
+        self.client_firstname.setPlaceholderText("Firstname")
+        self.client_middlename = AllCapsLineEdit()
+        self.client_middlename.setPlaceholderText("Middlename")
+        self.client_ext = AllCapsLineEdit()
+        self.client_ext.setPlaceholderText("Ext")
+        self.client_ext.setFixedWidth(50)
+        cl_fullname_sizer.addWidget(self.client_lastname)
+        cl_fullname_sizer.addWidget(self.client_firstname)
+        cl_fullname_sizer.addWidget(self.client_middlename)
+        cl_fullname_sizer.addWidget(self.client_ext)
+        box_sizer_client.addLayout(cl_fullname_sizer)
 
-        self.client_firstname = AllCapsTextCtrl(client_panel, style=wx.TE_PROCESS_ENTER)
-        self.client_firstname.SetHint("Firstname")
-        cl_fullname_sizer.Add(self.client_firstname, 1, wx.EXPAND, 5)
-        cl_fullname_sizer.AddSpacer(10)
+        cl_gender_civil = QHBoxLayout()
+        cl_gender_col = QVBoxLayout()
+        cl_gender_col.addWidget(QLabel("Gender"))
+        self.client_gender = NoScrollComboBox()
+        self.client_gender.addItems(gender_list)
+        self.client_gender.setCurrentIndex(0)
+        self.client_gender.currentIndexChanged.connect(self.on_choice_change_client)
+        cl_gender_col.addWidget(self.client_gender)
+        cl_gender_civil.addLayout(cl_gender_col)
 
-        self.client_middlename = AllCapsTextCtrl(client_panel, style=wx.TE_PROCESS_ENTER)
-        self.client_middlename.SetHint("Middlename")
-        cl_fullname_sizer.Add(self.client_middlename, 1, wx.EXPAND, 5)
-        cl_fullname_sizer.AddSpacer(10)
-
-        self.client_ext = AllCapsTextCtrl(client_panel, style=wx.TE_PROCESS_ENTER, size=(50, -1))
-        self.client_ext.SetHint("Ext")
-        cl_fullname_sizer.Add(self.client_ext, 0, wx.EXPAND, 5)
-
-        box_sizer_client.Add(wx.StaticText(client_panel, label="Fullname:"), 0, wx.ALL, 5)
-        box_sizer_client.Add(cl_fullname_sizer, 0, wx.ALL | wx.EXPAND, 5)
-
-        self.client_gender = wx.Choice(client_panel, choices=gender_list)
-        self.client_gender.Bind(wx.EVT_CHOICE, self.on_choice_change_client)  # Bind event
-        self.client_gender.SetSelection(0)
-        cl_gender_civil_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        cl_gender_sizer = wx.BoxSizer(wx.VERTICAL)
-        cl_gender_sizer.Add(wx.StaticText(client_panel, label="Gender"), 1, wx.EXPAND, 5)
-        cl_gender_sizer.Add(self.client_gender, 1, wx.EXPAND, 5)
-        cl_gender_civil_sizer.Add(cl_gender_sizer, 1, wx.EXPAND, 5)
-
-        # Create display strings combining the two data fields
         self.civil_status_choices = [name for _, name in civil_status_list]
-        # Create a map for quick lookup
         self.civil_status_data_map = {value: name for name, value in civil_status_list}
+        cl_civil_col = QVBoxLayout()
+        cl_civil_col.addWidget(QLabel("Civil Status"))
+        self.client_civil_status = NoScrollComboBox()
+        self.client_civil_status.addItems(self.civil_status_choices)
+        self.client_civil_status.currentIndexChanged.connect(self.on_selection)
+        cl_civil_col.addWidget(self.client_civil_status)
+        cl_gender_civil.addLayout(cl_civil_col)
+        box_sizer_client.addLayout(cl_gender_civil)
 
-        self.client_civil_status = wx.ComboBox(client_panel, choices=self.civil_status_choices, style=wx.CB_READONLY)
-        # Bind event
-        self.client_civil_status.Bind(wx.EVT_COMBOBOX, self.on_selection)
-        cl_gender_civil_sizer.AddSpacer(10)
-        cl_civil_sizer = wx.BoxSizer(wx.VERTICAL)
-        cl_civil_sizer.Add(wx.StaticText(client_panel, label="Civil Status"), 1, wx.EXPAND, 5)
-        cl_civil_sizer.Add(self.client_civil_status, 1, wx.EXPAND, 5)
-        cl_gender_civil_sizer.Add(cl_civil_sizer, 1, wx.EXPAND, 5)
-        box_sizer_client.Add(cl_gender_civil_sizer, 0, wx.ALL | wx.EXPAND, 5)
+        from PySide6.QtWidgets import QDateEdit
+        box_sizer_client.addWidget(QLabel("Birthday:"))
+        self.client_bday = QDateEdit()
+        self.client_bday.setCalendarPopup(True)
+        self.client_bday.setDate(QDate.currentDate())
+        self.client_bday.dateChanged.connect(self.c_compute_age)
+        box_sizer_client.addWidget(self.client_bday)
 
-        self.client_bday = wx.adv.DatePickerCtrl(client_panel, style=wx.adv.DP_DROPDOWN)
-        self.client_bday.Bind(wx.adv.EVT_DATE_CHANGED, self.c_compute_age)  # Bind event
-        box_sizer_client.Add(wx.StaticText(client_panel, label="Birthday:"), 0, wx.ALL, 5)
-        box_sizer_client.Add(self.client_bday, 0, wx.ALL | wx.EXPAND, 5)
+        box_sizer_client.addWidget(QLabel("Age:"))
+        self.client_age = AllCapsLineEdit()
+        box_sizer_client.addWidget(self.client_age)
 
-        self.client_age = AllCapsTextCtrl(client_panel, style=wx.TE_PROCESS_ENTER)
-        box_sizer_client.Add(wx.StaticText(client_panel, label="Age:"), 0, wx.ALL, 5)
-        box_sizer_client.Add(self.client_age, 0, wx.ALL | wx.EXPAND, 5)
+        box_sizer_client.addWidget(QLabel("Contact No:"))
+        self.client_contact_no = AllCapsLineEdit()
+        box_sizer_client.addWidget(self.client_contact_no)
 
-        self.client_contact_no = AllCapsTextCtrl(client_panel, style=wx.TE_PROCESS_ENTER)
-        box_sizer_client.Add(wx.StaticText(client_panel, label="Contact No:"), 0, wx.ALL, 5)
-        box_sizer_client.Add(self.client_contact_no, 0, wx.ALL | wx.EXPAND, 5)
+        cl_address = QHBoxLayout()
+        cl_house_col = QVBoxLayout()
+        cl_house_col.addWidget(QLabel("House | Street No:"))
+        self.client_house_street = AllCapsLineEdit()
+        cl_house_col.addWidget(self.client_house_street)
+        cl_address.addLayout(cl_house_col)
 
-        self.client_house_street = AllCapsTextCtrl(client_panel, style=wx.TE_PROCESS_ENTER)
-        cl_address_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        cl_house_sizer = wx.BoxSizer(wx.VERTICAL)
-        cl_house_sizer.Add(wx.StaticText(client_panel, label="House | Street No:"), 1, wx.EXPAND, 5)
-        cl_house_sizer.Add(self.client_house_street, 1, wx.EXPAND, 5)
-        cl_address_sizer.Add(cl_house_sizer, 1, wx.EXPAND, 5)
+        cl_brgy_col = QVBoxLayout()
+        cl_brgy_col.addWidget(QLabel("Barangay"))
+        self.client_barangay = QLineEdit()
+        cl_brgy_col.addWidget(self.client_barangay)
+        cl_address.addLayout(cl_brgy_col)
 
-        self.client_barangay = AllTextCtrl(client_panel, style=wx.TE_PROCESS_ENTER)
-        cl_address_sizer.AddSpacer(10)
-        cl_brgy_sizer = wx.BoxSizer(wx.VERTICAL)
-        cl_brgy_sizer.Add(wx.StaticText(client_panel, label="Barangay"), 1, wx.EXPAND, 5)
-        cl_brgy_sizer.Add(self.client_barangay, 1, wx.EXPAND, 5)
-        cl_address_sizer.Add(cl_brgy_sizer, 1, wx.EXPAND, 5)
+        cl_city_col = QVBoxLayout()
+        cl_city_col.addWidget(QLabel("City | Municipality"))
+        self.client_city = NoScrollComboBox()
+        self.client_city.addItems(list_of_city)
+        cl_city_col.addWidget(self.client_city)
+        cl_address.addLayout(cl_city_col)
+        box_sizer_client.addLayout(cl_address)
 
-        self.client_city = wx.Choice(client_panel, choices=list_of_city)
-        cl_address_sizer.AddSpacer(10)
-        cl_city_sizer = wx.BoxSizer(wx.VERTICAL)
-        cl_city_sizer.Add(wx.StaticText(client_panel, label="City | Municipality"), 1, wx.EXPAND, 5)
-        cl_city_sizer.Add(self.client_city, 1, wx.EXPAND, 5)
-        cl_address_sizer.Add(cl_city_sizer, 1, wx.EXPAND, 5)
+        box_sizer_client.addWidget(QLabel("Target Sector"))
+        self.target_sector = NoScrollComboBox()
+        self.target_sector.addItems(target_sector_list)
+        self.target_sector.setCurrentIndex(0)
+        box_sizer_client.addWidget(self.target_sector)
 
-        # Force tab order explicitly
-        self.client_gender.MoveAfterInTabOrder(self.client_ext)
-        self.client_civil_status.MoveAfterInTabOrder(self.client_gender)
-        self.client_bday.MoveAfterInTabOrder(self.client_civil_status)
-        self.client_age.MoveAfterInTabOrder(self.client_bday)
-        self.client_contact_no.MoveAfterInTabOrder(self.client_age)
-        self.client_house_street.MoveAfterInTabOrder(self.client_contact_no)
-        self.client_barangay.MoveAfterInTabOrder(self.client_house_street)
-        self.client_city.MoveAfterInTabOrder(self.client_barangay)
+        notebook.addTab(client_panel, "Client Information")
 
-        disable_mousewheel(self.client_relationship)
-        disable_mousewheel(self.client_gender)
-        disable_mousewheel(self.client_civil_status)
-        disable_mousewheel(self.client_city)
+        # ── Beneficiary Tab ──────────────────────────────────────────────
+        helper_sizer = QHBoxLayout()
+        self.same_address = QCheckBox("Same Address")
+        self.same_address.stateChanged.connect(self.same_address_event)
+        self.same_contact = QCheckBox("Same Contact No.")
+        self.same_contact.stateChanged.connect(self.same_contact_event)
+        helper_sizer.addWidget(self.same_address)
+        helper_sizer.addWidget(self.same_contact)
+        box_sizer_bene.addLayout(helper_sizer)
 
-        box_sizer_client.Add(cl_address_sizer, 0, wx.ALL | wx.EXPAND, 5)
+        box_sizer_bene.addWidget(QLabel("Relationship to bene:"))
+        self.bene_relationship = NoScrollComboBox()
+        self.bene_relationship.addItems(self.relationship_choices)
+        self.bene_relationship.setCurrentIndex(0)
+        box_sizer_bene.addWidget(self.bene_relationship)
 
-        self.target_sector = wx.Choice(client_panel, choices=target_sector_list)
-        self.target_sector.SetSelection(0)
-        box_sizer_client.Add(wx.StaticText(client_panel, label="Target Sector"), 0, wx.ALL, 5)
-        box_sizer_client.Add(self.target_sector, 1, wx.ALL | wx.EXPAND, 5)
+        box_sizer_bene.addWidget(QLabel("Fullname:"))
+        bene_fullname_sizer = QHBoxLayout()
+        self.bene_lastname = AllCapsLineEdit()
+        self.bene_lastname.setPlaceholderText("Lastname")
+        self.bene_firstname = AllCapsLineEdit()
+        self.bene_firstname.setPlaceholderText("Firstname")
+        self.bene_middlename = AllCapsLineEdit()
+        self.bene_middlename.setPlaceholderText("Middlename")
+        self.bene_ext = AllCapsLineEdit()
+        self.bene_ext.setPlaceholderText("Ext")
+        self.bene_ext.setFixedWidth(50)
+        bene_fullname_sizer.addWidget(self.bene_lastname)
+        bene_fullname_sizer.addWidget(self.bene_firstname)
+        bene_fullname_sizer.addWidget(self.bene_middlename)
+        bene_fullname_sizer.addWidget(self.bene_ext)
+        box_sizer_bene.addLayout(bene_fullname_sizer)
 
-        box_sizer_client.AddSpacer(10)
+        bene_gender_civil = QHBoxLayout()
+        bene_gender_col = QVBoxLayout()
+        bene_gender_col.addWidget(QLabel("Gender"))
+        self.bene_gender = NoScrollComboBox()
+        self.bene_gender.addItems(gender_list)
+        self.bene_gender.setCurrentIndex(0)
+        self.bene_gender.currentIndexChanged.connect(self.on_choice_change_bene)
+        bene_gender_col.addWidget(self.bene_gender)
+        bene_gender_civil.addLayout(bene_gender_col)
 
-        # Set the sizer for each panel
-        client_panel.SetSizerAndFit(box_sizer_client)
+        bene_civil_col = QVBoxLayout()
+        bene_civil_col.addWidget(QLabel("Civil Status"))
+        self.bene_civil_status = NoScrollComboBox()
+        self.bene_civil_status.addItems(self.civil_status_choices)
+        bene_civil_col.addWidget(self.bene_civil_status)
+        bene_gender_civil.addLayout(bene_civil_col)
+        box_sizer_bene.addLayout(bene_gender_civil)
 
-        # Beneficiary Checkbox
-        self.same_address = wx.CheckBox(bene_panel, label="Same Address")
-        self.same_address.Bind(wx.EVT_CHECKBOX, self.same_address_event)
+        box_sizer_bene.addWidget(QLabel("Birthday:"))
+        self.bene_bday = QDateEdit()
+        self.bene_bday.setCalendarPopup(True)
+        self.bene_bday.setDate(QDate.currentDate())
+        self.bene_bday.dateChanged.connect(self.b_compute_age)
+        box_sizer_bene.addWidget(self.bene_bday)
 
-        self.same_contact = wx.CheckBox(bene_panel, label="Same Contact No.")
-        self.same_contact.Bind(wx.EVT_CHECKBOX, self.same_contact_event)
+        box_sizer_bene.addWidget(QLabel("Age:"))
+        self.bene_age = AllCapsLineEdit()
+        box_sizer_bene.addWidget(self.bene_age)
 
-        helper_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        helper_sizer.Add(self.same_address, 0, wx.ALL | wx.EXPAND, 5)
-        helper_sizer.Add(self.same_contact, 0, wx.ALL | wx.EXPAND, 5)
+        box_sizer_bene.addWidget(QLabel("Contact No:"))
+        self.bene_contact_no = AllCapsLineEdit()
+        box_sizer_bene.addWidget(self.bene_contact_no)
 
-        box_sizer_bene.Add(helper_sizer, 0, wx.EXPAND, 5)
+        bene_address = QHBoxLayout()
+        bene_house_col = QVBoxLayout()
+        bene_house_col.addWidget(QLabel("House | Street No:"))
+        self.bene_house_street = AllCapsLineEdit()
+        bene_house_col.addWidget(self.bene_house_street)
+        bene_address.addLayout(bene_house_col)
 
-        self.relationship_choices = [name for _, name in relationship_list]
-        self.relationship_data_map = {value: name for name, value in relationship_list}
+        bene_brgy_col = QVBoxLayout()
+        bene_brgy_col.addWidget(QLabel("Barangay"))
+        self.bene_barangay = AllCapsLineEdit()
+        bene_brgy_col.addWidget(self.bene_barangay)
+        bene_address.addLayout(bene_brgy_col)
 
-        self.bene_relationship = wx.Choice(bene_panel, choices=self.relationship_choices)
-        self.bene_relationship.SetSelection(0)
-        box_sizer_bene.Add(wx.StaticText(bene_panel, label="Relationship to bene:"), 0, wx.ALL, 5)
-        box_sizer_bene.Add(self.bene_relationship, 0, wx.ALL | wx.EXPAND, 5)
+        bene_city_col = QVBoxLayout()
+        bene_city_col.addWidget(QLabel("City | Municipality"))
+        self.bene_city = NoScrollComboBox()
+        self.bene_city.addItems(list_of_city)
+        bene_city_col.addWidget(self.bene_city)
+        bene_address.addLayout(bene_city_col)
+        box_sizer_bene.addLayout(bene_address)
 
-        self.bene_lastname = AllCapsTextCtrl(bene_panel, style=wx.TE_PROCESS_ENTER)
-        self.bene_firstname = AllCapsTextCtrl(bene_panel, style=wx.TE_PROCESS_ENTER)
-        self.bene_middlename = AllCapsTextCtrl(bene_panel, style=wx.TE_PROCESS_ENTER)
-        self.bene_lastname.SetHint("Lastname")
-        self.bene_firstname.SetHint("Firstname")
-        self.bene_middlename.SetHint("Middlename")
-        self.bene_ext = AllCapsTextCtrl(bene_panel, style=wx.TE_PROCESS_ENTER, size=(50, -1))
-        self.bene_ext.SetHint("Ext")
-        bene_fullname_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        bene_fullname_sizer.Add(self.bene_lastname, 1, wx.EXPAND, 5)
-        bene_fullname_sizer.AddSpacer(10)
-        bene_fullname_sizer.Add(self.bene_firstname, 1, wx.EXPAND, 5)
-        bene_fullname_sizer.AddSpacer(10)
-        bene_fullname_sizer.Add(self.bene_middlename, 1, wx.EXPAND, 5)
-        bene_fullname_sizer.AddSpacer(10)
-        bene_fullname_sizer.Add(self.bene_ext, 0, wx.EXPAND, 5)
+        box_sizer_bene.addWidget(QLabel("Target Sector Beneficiary"))
+        self.target_sector_bene = NoScrollComboBox()
+        self.target_sector_bene.addItems(target_sector_list)
+        self.target_sector_bene.setCurrentIndex(0)
+        box_sizer_bene.addWidget(self.target_sector_bene)
 
-        box_sizer_bene.Add(wx.StaticText(bene_panel, label="Fullname:"), 0, wx.ALL, 5)
-        box_sizer_bene.Add(bene_fullname_sizer, 0, wx.ALL | wx.EXPAND, 5)
+        notebook.addTab(bene_panel, "Beneficiary Details")
 
-        self.bene_gender = wx.Choice(bene_panel, choices=gender_list)
-        self.bene_gender.Bind(wx.EVT_CHOICE, self.on_choice_change_bene)  # Bind event
-        self.bene_gender.SetSelection(0)
-        bene_gender_civil_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        bene_gender_sizer = wx.BoxSizer(wx.VERTICAL)
-        bene_gender_sizer.Add(wx.StaticText(bene_panel, label="Gender"), 1, wx.EXPAND, 5)
-        bene_gender_sizer.Add(self.bene_gender, 1, wx.EXPAND, 5)
-        bene_gender_civil_sizer.Add(bene_gender_sizer, 1, wx.EXPAND, 5)
+        # ── Social Worker Tab ────────────────────────────────────────────
+        box_sizer_sw.addSpacing(10)
+        sw_caption_sizer = QHBoxLayout()
+        sw_caption_sizer.addWidget(QLabel("Fullname (SW)"))
+        self.sw_thru_first_name = QCheckBox("Search thru Firstname")
+        sw_caption_sizer.addWidget(self.sw_thru_first_name)
+        box_sizer_sw.addLayout(sw_caption_sizer)
 
-        self.bene_civil_status = wx.Choice(bene_panel,choices=self.civil_status_choices)
-        bene_gender_civil_sizer.AddSpacer(10)
-        bene_civil_sizer = wx.BoxSizer(wx.VERTICAL)
-        bene_civil_sizer.Add(wx.StaticText(bene_panel, label="Civil Status"), 1, wx.EXPAND, 5)
-        bene_civil_sizer.Add(self.bene_civil_status, 1, wx.EXPAND, 5)
-        bene_gender_civil_sizer.Add(bene_civil_sizer, 1, wx.EXPAND, 5)
+        self.sw_last_name = QLineEdit()
+        self.sw_last_name.setPlaceholderText("Last Name")
+        self.sw_first_name = QLineEdit()
+        self.sw_first_name.setPlaceholderText("First Name")
+        self.sw_middle_name = QLineEdit()
+        self.sw_middle_name.setPlaceholderText("Middle Name")
+        sw_fullname_sizer = QHBoxLayout()
+        sw_fullname_sizer.addWidget(self.sw_last_name)
+        sw_fullname_sizer.addWidget(self.sw_first_name)
+        sw_fullname_sizer.addWidget(self.sw_middle_name)
+        box_sizer_sw.addLayout(sw_fullname_sizer)
 
-        box_sizer_bene.Add(bene_gender_civil_sizer, 0, wx.ALL | wx.EXPAND, 5)
+        btn_sw_add = QPushButton("Add")
+        btn_sw_update = QPushButton("Update")
+        btn_sw_delete = QPushButton("Delete")
+        btn_sw_add.clicked.connect(self.on_add_worker)
+        btn_sw_update.clicked.connect(self.on_update_worker)
+        btn_sw_delete.clicked.connect(self.on_delete_worker)
+        sw_btn_sizer = QHBoxLayout()
+        sw_btn_sizer.addWidget(btn_sw_add)
+        sw_btn_sizer.addWidget(btn_sw_update)
+        sw_btn_sizer.addWidget(btn_sw_delete)
+        box_sizer_sw.addLayout(sw_btn_sizer)
 
-        self.bene_bday = wx.adv.DatePickerCtrl(bene_panel, style=wx.adv.DP_DROPDOWN)
-        self.bene_bday.Bind(wx.adv.EVT_DATE_CHANGED, self.b_compute_age)  # Bind event
-        box_sizer_bene.Add(wx.StaticText(bene_panel, label="Birthday:"), 0, wx.ALL, 5)
-        box_sizer_bene.Add(self.bene_bday, 0, wx.ALL | wx.EXPAND, 5)
+        self.list_ctrl_worker = QTableWidget(0, 5)
+        self.list_ctrl_worker.setHorizontalHeaderLabels(["ID", "Lastname", "Firstname", "Middlename", "Thru Firstname"])
+        self.list_ctrl_worker.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.list_ctrl_worker.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.list_ctrl_worker.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.list_ctrl_worker.itemSelectionChanged.connect(self.on_select_worker)
+        box_sizer_sw.addWidget(self.list_ctrl_worker)
 
-        self.bene_age = AllCapsTextCtrl(bene_panel, style=wx.TE_PROCESS_ENTER)
-        box_sizer_bene.Add(wx.StaticText(bene_panel, label="Age:"), 0, wx.ALL, 5)
-        box_sizer_bene.Add(self.bene_age, 0, wx.ALL | wx.EXPAND, 5)
+        notebook.addTab(sw_panel, "Social Worker")
 
-        self.bene_contact_no = AllCapsTextCtrl(bene_panel, style=wx.TE_PROCESS_ENTER)
-        box_sizer_bene.Add(wx.StaticText(bene_panel, label="Contact No:"), 0, wx.ALL, 5)
-        box_sizer_bene.Add(self.bene_contact_no, 0, wx.ALL | wx.EXPAND, 5)
+        self.scroll_sizer.addWidget(notebook, 1)
 
-        self.bene_house_street = AllCapsTextCtrl(bene_panel, style=wx.TE_PROCESS_ENTER)
-        self.bene_barangay = AllCapsTextCtrl(bene_panel, style=wx.TE_PROCESS_ENTER)
-        self.bene_city = wx.Choice(bene_panel, choices=list_of_city)
+        # ── Assistance Section (below tabs) ─────────────────────────────
+        assist_box = QVBoxLayout()
 
-        bene_address_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        bene_house_sizer = wx.BoxSizer(wx.VERTICAL)
-        bene_house_sizer.Add(wx.StaticText(bene_panel, label="House | Street No:"), 1, wx.EXPAND, 5)
-        bene_house_sizer.Add(self.bene_house_street, 1, wx.EXPAND, 5)
-        bene_address_sizer.Add(bene_house_sizer, 1, wx.EXPAND, 5)
+        assistance_sizer = QHBoxLayout()
+        amount_col = QVBoxLayout()
+        amount_col.addWidget(QLabel("Amount:"))
+        self.amount = QLineEdit()
+        amount_col.addWidget(self.amount)
+        assistance_sizer.addLayout(amount_col)
 
-        bene_address_sizer.AddSpacer(10)
-        bene_brgy_sizer = wx.BoxSizer(wx.VERTICAL)
-        bene_brgy_sizer.Add(wx.StaticText(bene_panel, label="Barangay"), 1, wx.EXPAND, 5)
-        bene_brgy_sizer.Add(self.bene_barangay, 1, wx.EXPAND, 5)
-        bene_address_sizer.Add(bene_brgy_sizer, 1, wx.EXPAND, 5)
+        release_col = QVBoxLayout()
+        release_col.addWidget(QLabel("Mode of Release"))
+        self.mode_release = NoScrollComboBox()
+        self.mode_release.addItems(mode_of_release)
+        self.mode_release.setCurrentIndex(0)
+        release_col.addWidget(self.mode_release)
+        assistance_sizer.addLayout(release_col)
 
-        bene_address_sizer.AddSpacer(10)
-        bene_city_sizer = wx.BoxSizer(wx.VERTICAL)
-        bene_city_sizer.Add(wx.StaticText(bene_panel, label="City | Municipality"), 1, wx.EXPAND, 5)
-        bene_city_sizer.Add(self.bene_city, 1, wx.EXPAND, 5)
-        bene_address_sizer.Add(bene_city_sizer, 1, wx.EXPAND, 5)
+        financial_col = QVBoxLayout()
+        financial_col.addWidget(QLabel("Assistance"))
+        self.financial_assist = NoScrollComboBox()
+        self.financial_assist.addItems(financial_assistance_list)
+        self.financial_assist.setCurrentIndex(4)
+        financial_col.addWidget(self.financial_assist)
+        assistance_sizer.addLayout(financial_col)
 
-        box_sizer_bene.Add(bene_address_sizer, 0, wx.ALL | wx.EXPAND, 5)
-
-        # Force tab order explicitly
-        self.bene_gender.MoveAfterInTabOrder(self.bene_ext)
-        self.bene_civil_status.MoveAfterInTabOrder(self.bene_gender)
-        self.bene_bday.MoveAfterInTabOrder(self.bene_civil_status)
-        self.bene_age.MoveAfterInTabOrder(self.bene_bday)
-        self.bene_contact_no.MoveAfterInTabOrder(self.bene_age)
-        self.bene_house_street.MoveAfterInTabOrder(self.bene_contact_no)
-        self.bene_barangay.MoveAfterInTabOrder(self.bene_house_street)
-        self.bene_city.MoveAfterInTabOrder(self.bene_barangay)
-        #
-        disable_mousewheel(self.bene_relationship)
-        disable_mousewheel(self.bene_gender)
-        disable_mousewheel(self.bene_civil_status)
-        disable_mousewheel(self.bene_city)
-
-        self.target_sector_bene = wx.Choice(bene_panel, choices=target_sector_list)
-        self.target_sector_bene.SetSelection(0)
-        box_sizer_bene.Add(wx.StaticText(bene_panel, label="Target Sector Beneficiary"), 0, wx.ALL| wx.EXPAND, 5)
-        box_sizer_bene.Add(self.target_sector_bene, 1, wx.ALL | wx.EXPAND, 5)
-        box_sizer_bene.AddSpacer(10)
-
-        bene_panel.SetSizerAndFit(box_sizer_bene)
-
-        self.sw_last_name = wx.TextCtrl(sw_panel)
-        self.sw_first_name = wx.TextCtrl(sw_panel)
-        self.sw_middle_name = wx.TextCtrl(sw_panel)
-        self.sw_last_name.SetHint("Last Name")
-        self.sw_first_name.SetHint("First Name")
-        self.sw_middle_name.SetHint("Middle Name")
-
-        sw_sizer_fullname = wx.BoxSizer(wx.HORIZONTAL)
-        sw_sizer_fullname.Add(self.sw_last_name, 1, wx.EXPAND, 5)
-        sw_sizer_fullname.AddSpacer(10)
-        sw_sizer_fullname.Add(self.sw_first_name, 1, wx.EXPAND, 5)
-        sw_sizer_fullname.AddSpacer(10)
-        sw_sizer_fullname.Add(self.sw_middle_name, 1, wx.EXPAND, 5)
-
-        # Search thru Firstname
-        self.sw_thru_first_name = wx.CheckBox(sw_panel, label="Search thru Firstname")
-        # assist_box.Add(self.thru_firstname, 0, wx.ALL, 5)
-
-        sw_sizer_caption = wx.BoxSizer(wx.HORIZONTAL)
-        sw_sizer_caption.Add(wx.StaticText(sw_panel, label="Fullname (SW)"), 1, wx.ALL, 5)
-        sw_sizer_caption.Add(self.sw_thru_first_name, 0, wx.ALL, 5)
-
-        box_sizer_sw.AddSpacer(10)
-        box_sizer_sw.Add(sw_sizer_caption, 0, wx.EXPAND, 5)
-        box_sizer_sw.Add(sw_sizer_fullname, 0, wx.ALL | wx.EXPAND, 5)
-
-        btn_sw_add = wx.Button(sw_panel, label="Add")
-        btn_sw_update = wx.Button(sw_panel, label="Update")
-        btn_sw_delete = wx.Button(sw_panel, label="Delete")
-
-        # Event bindings
-        btn_sw_add.Bind(wx.EVT_BUTTON, self.on_add_worker)
-        btn_sw_update.Bind(wx.EVT_BUTTON, self.on_update_worker)
-        btn_sw_delete.Bind(wx.EVT_BUTTON, self.on_delete_worker)
-
-        control_container = wx.BoxSizer(wx.HORIZONTAL)
-        control_container.Add(btn_sw_add, 0, wx.EXPAND, 5)
-        control_container.AddSpacer(5)
-        control_container.Add(btn_sw_update, 0, wx.EXPAND, 5)
-        control_container.AddSpacer(5)
-        control_container.Add(btn_sw_delete, 0, wx.EXPAND, 5)
-        control_container.AddSpacer(5)
-
-        box_sizer_sw.Add(control_container, 0, wx.ALL | wx.EXPAND, 5)
-
-        # Table (ListCtrl)
-        self.list_ctrl_worker = wx.ListCtrl(sw_panel, style=wx.LB_SINGLE, size=(-1, -1))
-        self.list_ctrl_worker.InsertColumn(0, "ID", width=30)
-        self.list_ctrl_worker.InsertColumn(1, "Lastname", width=200)
-        self.list_ctrl_worker.InsertColumn(2, "Firstname", width=200)
-        self.list_ctrl_worker.InsertColumn(3, "Middlename", width=100)
-        self.list_ctrl_worker.InsertColumn(4, "Thru Firstname", width=100)
-        self.list_ctrl_worker.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_select_worker)
-        box_sizer_sw.Add(self.list_ctrl_worker, 1, wx.ALL | wx.EXPAND, 5)
-
-        sw_panel.SetSizerAndFit(box_sizer_sw)
-
-        # Add panels to the notebook
-        notebook.AddPage(client_panel, "Client Information")
-        notebook.AddPage(bene_panel, "Beneficiary Details")
-        notebook.AddPage(sw_panel, "Social Worker")
-
-        self.scroll_sizer.Add(notebook, 1, flag=wx.EXPAND)
-
-        self.mode_of_admission = wx.Choice(scroll, choices=["On-site", "Walk-in", "Referral"])
-        self.mode_of_admission.SetSelection(1)  # Default: Walk-In
-
-        self.interview_date = wx.adv.DatePickerCtrl(scroll)
-
-        # Assistance Information Group
-
-        assist_box = wx.BoxSizer(wx.VERTICAL)
-        assistance_sizer = wx.BoxSizer(wx.HORIZONTAL)
-
-        self.amount = wx.TextCtrl(scroll)
-        assistance_amount_sizer = wx.BoxSizer(wx.VERTICAL)
-        assistance_amount_sizer.Add(wx.StaticText(scroll, label="Amount:"), 0, wx.ALL, 5)
-        assistance_amount_sizer.Add(self.amount, 0, wx.EXPAND, 5)
-        assistance_sizer.Add(assistance_amount_sizer, 1, wx.EXPAND, 5)
-
-        assistance_sizer.AddSpacer(10)
-
-        self.mode_release = wx.Choice(scroll, choices=mode_of_release, size=(140, -1))
-        self.mode_release.SetSelection(0)
-        assistance_release_sizer = wx.BoxSizer(wx.VERTICAL)
-        assistance_release_sizer.Add(wx.StaticText(scroll, label="Mode of Release"), 1, wx.ALL , 5)
-        assistance_release_sizer.Add(self.mode_release, 0, wx.EXPAND, 5)
-        assistance_sizer.Add(assistance_release_sizer, 0, wx.EXPAND, 5)
-
-        assistance_sizer.AddSpacer(10)
-
-        self.financial_assist = wx.Choice(scroll, choices=financial_assistance_list, size=(150, -1))
-        self.financial_assist.SetSelection(4)
-        assistance_financial_sizer = wx.BoxSizer(wx.VERTICAL)
-        assistance_financial_sizer.Add(wx.StaticText(scroll, label="Assistance"), 1, wx.ALL , 5)
-        assistance_financial_sizer.Add(self.financial_assist, 0, wx.EXPAND, 5)
-        assistance_sizer.Add(assistance_financial_sizer, 0, wx.EXPAND, 5)
-
-        assistance_sizer.AddSpacer(10)
-
-        # PSIF 2025, AKAP
         self.fund_source_choices = [name for _, name in fund_source_list]
         self.fund_source_data_map = {value: name for name, value in fund_source_list}
+        fund_col = QVBoxLayout()
+        fund_col.addWidget(QLabel("Fund Source:"))
+        self.fund_source = NoScrollComboBox()
+        self.fund_source.addItems(self.fund_source_choices)
+        self.fund_source.setCurrentIndex(1)
+        fund_col.addWidget(self.fund_source)
+        assistance_sizer.addLayout(fund_col)
+        assist_box.addLayout(assistance_sizer)
 
-        self.fund_source = wx.Choice(scroll, choices=self.fund_source_choices, size=(150, -1))
-        self.fund_source.SetSelection(1)
-        fund_sizer = wx.BoxSizer(wx.VERTICAL)
-        fund_sizer.Add(wx.StaticText(scroll, label="Fund Source:"), 1, wx.ALL, 5)
-        fund_sizer.Add(self.fund_source, 0, wx.EXPAND, 5)
-        assistance_sizer.Add(fund_sizer, 0, wx.EXPAND, 5)
+        mode_sizer = QHBoxLayout()
+        subcat_col = QVBoxLayout()
+        subcat_col.addWidget(QLabel("Sub Category"))
+        self.sub_category = NoScrollComboBox()
+        self.sub_category.addItems(list(client_sub_category.keys()))
+        subcat_col.addWidget(self.sub_category)
+        mode_sizer.addLayout(subcat_col)
 
-        assist_box.Add(assistance_sizer, 0, wx.ALL | wx.EXPAND, 5)
-       
-        mode_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        
-       
-        self.sub_category = wx.Choice(scroll, choices=list(client_sub_category.keys()) , size=(140, -1))
-        # self.sub_category.SetSelection(14)  # Default: Walk-In
+        mode_admit_col = QVBoxLayout()
+        mode_admit_col.addWidget(QLabel("Mode of Admission:"))
+        self.mode_of_admission = NoScrollComboBox()
+        self.mode_of_admission.addItems(["On-site", "Walk-in", "Referral"])
+        self.mode_of_admission.setCurrentIndex(1)
+        mode_admit_col.addWidget(self.mode_of_admission)
+        mode_sizer.addLayout(mode_admit_col)
 
-        sub_category_sizer = wx.BoxSizer(wx.VERTICAL)
-        sub_category_sizer.Add(wx.StaticText(scroll, label="Sub Category"), 0, wx.ALL, 5)
-        sub_category_sizer.Add(self.sub_category, 0, wx.EXPAND, 5)
-        mode_sizer.Add(sub_category_sizer, 1, wx.EXPAND, 5)
-
-        mode_sizer.AddSpacer(10)
-
-        mode_of_admission_sizer = wx.BoxSizer(wx.VERTICAL)
-        mode_of_admission_sizer.Add(wx.StaticText(scroll, label="Mode of Admission:"), 0, wx.ALL, 5)
-        mode_of_admission_sizer.Add(self.mode_of_admission, 0, wx.EXPAND, 5)
-        mode_sizer.Add(mode_of_admission_sizer, 1, wx.EXPAND, 5)
-
-        mode_sizer.AddSpacer(10)
-
-        date_interview_sizer = wx.BoxSizer(wx.VERTICAL)
-        date_interview_sizer.Add(wx.StaticText(scroll, label="Date Interview :"), 0, wx.ALL, 5)
-        date_interview_sizer.Add(self.interview_date, 0, wx.EXPAND, 5)
-        mode_sizer.Add(date_interview_sizer, 1, wx.EXPAND, 5)
-
-        assist_box.Add(mode_sizer, 0, wx.ALL | wx.EXPAND, 5)
+        from PySide6.QtWidgets import QDateEdit as _QDE
+        date_int_col = QVBoxLayout()
+        date_int_col.addWidget(QLabel("Date Interview:"))
+        self.interview_date = _QDE()
+        self.interview_date.setCalendarPopup(True)
+        self.interview_date.setDate(QDate.currentDate())
+        date_int_col.addWidget(self.interview_date)
+        mode_sizer.addLayout(date_int_col)
+        assist_box.addLayout(mode_sizer)
 
         self.social_worker_list = get_all_workers()
         self.social_worker_choices = [f"{fname}, {mname}, {lname}" for (_id, lname, fname, mname, _thru) in self.social_worker_list]
 
-        self.social_worker = wx.Choice(scroll, choices=self.social_worker_choices, size=(150, -1))
-        self.social_worker.Bind(wx.EVT_CHOICE, self.on_selection_worker)  # Bind event
+        worker_label_sizer = QHBoxLayout()
+        worker_label_sizer.addWidget(QLabel("Social Worker"))
+        assist_box.addLayout(worker_label_sizer)
 
-        self.social_worker_filter = wx.TextCtrl(scroll)
-        self.social_worker_filter.Bind(wx.EVT_TEXT, self.on_sw_text_change)
+        worker_sizer = QHBoxLayout()
+        self.social_worker_filter = QLineEdit()
+        self.social_worker_filter.textChanged.connect(self.on_sw_text_change)
+        worker_sizer.addWidget(self.social_worker_filter, 2)
+        self.social_worker = NoScrollComboBox()
+        self.social_worker.addItems(self.social_worker_choices)
+        self.social_worker.currentIndexChanged.connect(self.on_selection_worker)
+        worker_sizer.addWidget(self.social_worker, 8)
+        assist_box.addLayout(worker_sizer)
 
-        worker_label_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        worker_label_sizer.Add(wx.StaticText(scroll, label="Social Worker"), 1, wx.ALL, 5)
-        assist_box.Add(worker_label_sizer, 0, wx.EXPAND, 5)
+        self.sw_lname = QLineEdit()
+        self.sw_lname.setPlaceholderText("Lastname")
+        self.sw_lname.hide()
+        self.sw_fname = QLineEdit()
+        self.sw_fname.setPlaceholderText("Firstname")
+        self.sw_fname.hide()
+        self.sw_mname = QLineEdit()
+        self.sw_mname.setPlaceholderText("Middlename")
+        self.sw_mname.hide()
 
-        worker_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        worker_sizer.Add(self.social_worker_filter, 0,  wx.EXPAND, 5)
-        worker_sizer.AddSpacer(10)
-        worker_sizer.Add(self.social_worker, 1,  wx.EXPAND, 5)
+        sw_fullname_sizer2 = QHBoxLayout()
+        sw_fullname_sizer2.addWidget(self.sw_lname)
+        sw_fullname_sizer2.addWidget(self.sw_fname)
+        sw_fullname_sizer2.addWidget(self.sw_mname)
+        self.thru_firstname = QCheckBox("Search thru Firstname")
+        self.thru_firstname.hide()
+        assist_box.addLayout(sw_fullname_sizer2)
 
-        assist_box.Add(worker_sizer, 0, wx.ALL | wx.EXPAND, 5)
+        self.encode_id = QLineEdit()
+        self.encode_id.hide()
 
-        self.sw_lname = wx.TextCtrl(scroll)
-        self.sw_fname = wx.TextCtrl(scroll)
-        self.sw_mname = wx.TextCtrl(scroll)
-        self.sw_lname.SetHint("Lastname")
-        self.sw_fname.SetHint("Firstname")
-        self.sw_mname.SetHint("Middlename")
-        self.sw_lname.Hide()
-        self.sw_fname.Hide()
-        self.sw_mname.Hide()
+        sep1 = QFrame()
+        sep1.setFrameShape(QFrame.Shape.HLine)
+        assist_box.addWidget(sep1)
 
-        sw_fullname_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        sw_fullname_sizer.Add(self.sw_lname, 1, wx.EXPAND, 5)
-        sw_fullname_sizer.AddSpacer(10)
-        sw_fullname_sizer.Add(self.sw_fname, 1, wx.EXPAND, 5)
-        sw_fullname_sizer.AddSpacer(10)
-        sw_fullname_sizer.Add(self.sw_mname, 1, wx.EXPAND, 5)
+        assist_box.addWidget(QLabel("Encoder Name:"))
+        self.encoder_name = AllCapsLineEdit()
+        assist_box.addWidget(self.encoder_name)
 
-        # Search thru Firstname
-        self.thru_firstname = wx.CheckBox(scroll, label="Search thru Firstname")
-        self.thru_firstname.Hide()
+        assist_box.addWidget(QLabel("Approved By:"))
+        self.approved_by = NoScrollComboBox()
+        self.approved_by.addItems(list(approved_by_list.keys()))
+        assist_box.addWidget(self.approved_by)
 
-        label_sw = wx.StaticText(scroll, label="Fullname (SW)")
-        label_sw.Hide()
-        # assist_box.Add(self.thru_firstname, 0, wx.ALL, 5)
+        assist_box.addWidget(QLabel("Date Entered:"))
+        self.encoded_date = _QDE()
+        self.encoded_date.setCalendarPopup(True)
+        self.encoded_date.setDate(QDate.currentDate())
+        assist_box.addWidget(self.encoded_date)
 
-        sw_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        sw_sizer.Add(label_sw, 1, wx.ALL, 5)
-        sw_sizer.Add(self.thru_firstname, 0, wx.ALL, 5)
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.Shape.HLine)
+        self.scroll_sizer.addWidget(sep2)
+        self.scroll_sizer.addLayout(assist_box)
 
-        # Force tab order explicitly
+        # ── CRUD + Table section ─────────────────────────────────────────
+        crud_container = QVBoxLayout()
 
-        self.mode_release.MoveAfterInTabOrder(self.amount)
-        self.financial_assist.MoveAfterInTabOrder(self.mode_release)
-        self.fund_source.MoveAfterInTabOrder(self.financial_assist)
-        self.mode_of_admission.MoveAfterInTabOrder(self.fund_source)
-        self.interview_date.MoveAfterInTabOrder(self.mode_of_admission)
-        self.sw_lname.MoveAfterInTabOrder(self.interview_date)
-        self.sw_fname.MoveAfterInTabOrder(self.sw_lname)
-        self.sw_mname.MoveAfterInTabOrder(self.sw_fname)
-    
-        self.encode_id = wx.TextCtrl(scroll)
-        self.encode_id.Hide()
+        self.auto_next = QCheckBox("Auto Next")
+        self.auto_submit = QCheckBox("Auto Submit")
+        self.auto_finish = QCheckBox("Auto Finish")
 
-        horizontal_line = wx.StaticLine(scroll, style=wx.LI_HORIZONTAL)
-        assist_box.AddSpacer(5)
-        assist_box.Add(horizontal_line, 0, flag=wx.EXPAND | wx.TOP | wx.BOTTOM, border=5)
+        btn_crud_add = QPushButton("Add")
+        btn_crud_update = QPushButton("Update")
+        btn_crud_delete = QPushButton("Delete")
+        btn_crud_add.clicked.connect(self.on_add_person)
+        btn_crud_update.clicked.connect(self.on_update_person)
+        btn_crud_delete.clicked.connect(self.on_delete_person)
 
-        self.encoder_name = AllCapsTextCtrl(scroll, style=wx.TE_PROCESS_ENTER)
-        assist_box.Add(wx.StaticText(scroll, label="Encoder Name:"), 0, wx.ALL, 5)
-        assist_box.Add(self.encoder_name, 0, wx.ALL | wx.EXPAND, 5)
+        btn_set_encoded = QPushButton("Set Encoded")
+        btn_set_encoded.clicked.connect(self.on_set_encoded)
 
-        self.approved_by = wx.Choice(scroll, choices=list(approved_by_list.keys()))
-        assist_box.Add(wx.StaticText(scroll, label="Approved By:"), 0, wx.ALL, 5)
-        assist_box.Add(self.approved_by, 0, wx.ALL | wx.EXPAND, 5)
+        self.cb_encoded = QCheckBox("Encoded")
+        self.cb_encoded.stateChanged.connect(self.on_checkbox_change)
 
-        self.encoded_date = wx.adv.DatePickerCtrl(scroll)
-        assist_box.Add(wx.StaticText(scroll, label="Date Entered:"), 0, wx.ALL, 5)
-        assist_box.Add(self.encoded_date, 0, wx.ALL | wx.EXPAND, 5)
+        btn_export = QPushButton("Export")
+        btn_export.clicked.connect(self.on_export)
 
-        horizontal_line = wx.StaticLine(scroll, style=wx.LI_HORIZONTAL)
-        self.scroll_sizer.AddSpacer(5)
-        self.scroll_sizer.Add(horizontal_line, 0, flag=wx.EXPAND | wx.TOP | wx.BOTTOM, border=5)
+        control_container = QHBoxLayout()
+        control_container.addWidget(btn_crud_add)
+        control_container.addWidget(btn_crud_update)
+        control_container.addWidget(btn_crud_delete)
+        control_container.addWidget(btn_set_encoded)
+        control_container.addStretch()
+        control_container.addWidget(self.cb_encoded)
+        control_container.addWidget(btn_export)
+        crud_container.addLayout(control_container)
 
-        self.scroll_sizer.Add(assist_box, 0,  wx.EXPAND, 10)
-
-        scroll.SetSizer(self.scroll_sizer)
-
-        crud_container = wx.BoxSizer(wx.VERTICAL)
-
-        self.auto_next = wx.CheckBox(panel, label="Auto Next")
-        self.auto_submit = wx.CheckBox(panel, label="Auto Submit")
-        self.auto_finish = wx.CheckBox(panel, label="Auto Finish")
-
-        btn_crud_add = wx.Button(panel, label="Add")
-        btn_crud_update = wx.Button(panel, label="Update")
-        btn_crud_delete = wx.Button(panel, label="Delete")
-
-        disable_mousewheel(self.target_sector)
-        disable_mousewheel(self.financial_assist)
-
-        disable_mousewheel(self.mode_of_admission)
-        disable_mousewheel(self.fund_source)
-        disable_mousewheel(self.mode_release)
-        disable_mousewheel(self.sub_category)
-        disable_mousewheel(self.approved_by)
-        disable_mousewheel(self.social_worker)
-
-        # Event bindings
-        btn_crud_add.Bind(wx.EVT_BUTTON, self.on_add_person)
-        btn_crud_update.Bind(wx.EVT_BUTTON, self.on_update_person)
-        btn_crud_delete.Bind(wx.EVT_BUTTON, self.on_delete_person)
-
-        control_container = wx.BoxSizer(wx.HORIZONTAL)
-        control_container.Add(btn_crud_add, 0,  wx.EXPAND, 5)
-        control_container.AddSpacer(5)
-        control_container.Add(btn_crud_update, 0, wx.EXPAND, 5)
-        control_container.AddSpacer(5)
-        control_container.Add(btn_crud_delete, 0,  wx.EXPAND, 5)
-        control_container.AddSpacer(5)
-
-        btn_set_encoded = wx.Button(panel, label="Set Encoded")
-        btn_set_encoded.Bind(wx.EVT_BUTTON, self.on_set_encoded)
-        control_container.Add(btn_set_encoded, 0, wx.EXPAND, 5)
-        control_container.AddSpacer(5)
-
-        control_container.Add(wx.StaticText(panel, label=""), 1,  wx.EXPAND, 5)
-
-        self.cb_encoded = wx.CheckBox(panel, label="Encoded")
-        self.cb_encoded.Bind(wx.EVT_CHECKBOX, self.on_checkbox_change)
-        export_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        control_container.Add(self.cb_encoded, 0,  wx.EXPAND, 5)
-
-        btn_export = wx.Button(panel, label="Export")
-        btn_export.Bind(wx.EVT_BUTTON, self.on_export)
-        control_container.Add(btn_export, 0,  wx.EXPAND, 5)
-
-        crud_container.Add(control_container, 0, wx.EXPAND | wx.ALL , 5)
-
-        list_container = wx.BoxSizer(wx.VERTICAL)
-
-        # Table (ListCtrl)
-        self.list_ctrl = wx.ListCtrl(panel, style=wx.LB_SINGLE)
-        self.list_ctrl.InsertColumn(0, "ID", width=30)
-        self.list_ctrl.InsertColumn(1, "Lastname", width=100)
-        self.list_ctrl.InsertColumn(2, "Firstname", width=100)
-        self.list_ctrl.InsertColumn(3, "Middlename", width=100)
-        self.list_ctrl.InsertColumn(4, "Ext", width=50)
-        self.list_ctrl.InsertColumn(5, "Bday", width=100)
-        self.list_ctrl.InsertColumn(6, "Age", width=50)
-        self.list_ctrl.InsertColumn(7, "Assistance", width=100)
-        self.list_ctrl.InsertColumn(8, "Amount", width=100)
-        self.list_ctrl.InsertColumn(9, "SW", width=100)
-        self.list_ctrl.InsertColumn(10, "Encoded", width=80)
-        self.list_ctrl.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_select_person)
-
-        list_container.Add(self.list_ctrl, 1, wx.ALL | wx.EXPAND, 5)
-        list_log_container = wx.BoxSizer(wx.HORIZONTAL)
-        list_log_container.Add(list_container, 1, wx.EXPAND , 10)
-        crud_container.Add(list_log_container, 1, wx.ALL | wx.EXPAND, 5)
-
-        btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        btn_sizer.Add(option_sizer, 0, wx.EXPAND, 5)
-        btn_sizer.Add(self.fill_forms_btn, 1, wx.EXPAND, 5)
-        btn_sizer.Add(self.refresh_btn, 1, wx.EXPAND, 5)
-
-        btn_stop = wx.Button(panel, label="Stop")
-        btn_stop.Bind(wx.EVT_BUTTON, self.on_stop)
-
-        hbox_btns = wx.BoxSizer(wx.HORIZONTAL)
-        hbox_btns.AddMany([
-            (self.auto_next, 0, wx.ALL | wx.EXPAND, 5),
-            (self.auto_submit, 0, wx.ALL | wx.EXPAND, 5),
-            (self.auto_finish, 0, wx.ALL | wx.EXPAND, 5),
-            (btn_stop, 0, wx.ALL | wx.EXPAND, 5),
-            (wx.StaticText(panel, label=""), 1, wx.ALL | wx.EXPAND, 5),
-            (btn_sizer, 1, wx.ALL, 5)
+        self.list_ctrl = QTableWidget(0, 11)
+        self.list_ctrl.setHorizontalHeaderLabels([
+            "ID", "Lastname", "Firstname", "Middlename", "Ext",
+            "Bday", "Age", "Assistance", "Amount", "SW", "Encoded"
         ])
-        crud_container.Add(hbox_btns, 0, wx.EXPAND , 5)
+        self.list_ctrl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.list_ctrl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.list_ctrl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.list_ctrl.itemSelectionChanged.connect(self.on_select_person)
+        crud_container.addWidget(self.list_ctrl)
 
-        self.command_log = wx.TextCtrl(panel, style=wx.TE_MULTILINE | wx.TE_READONLY, size=(-1, 100))
-        self.command_log.SetMinSize((-1, 50))
-        crud_container.Add(self.command_log, 0, wx.EXPAND | wx.ALL, 5)
+        # ── Auto Fill section ────────────────────────────────────────────
+        autofill_container = QVBoxLayout()
 
-        btn_auto_fill = wx.Button(panel, label="Auto Fill")
-        btn_auto_fill.Bind(wx.EVT_BUTTON, self.on_auto_fill)
-        crud_container.Add(btn_auto_fill, 0, wx.EXPAND | wx.ALL, 5)
+        self.fill_forms_btn = QPushButton("Fill Form")
+        self.fill_forms_btn.clicked.connect(self.on_button_click)
+        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.clicked.connect(self.on_refresh)
+        self.cb_website = QCheckBox("WEB")
+        self.cb_offline = QCheckBox("OFF")
+        self.cb_mov = QCheckBox("MOV")
 
-        self.sizer.Add(scroll, 1, wx.ALL | wx.EXPAND, 5)
-        self.sizer.Add(crud_container, 0, wx.ALL | wx.EXPAND, 5)
+        btn_stop = QPushButton("Stop")
+        btn_stop.clicked.connect(self.on_stop)
 
-        panel.SetSizer(self.sizer)
-        self.Centre()
+        btn_auto_fill = QPushButton("Auto Fill")
+        btn_auto_fill.clicked.connect(self.on_auto_fill)
+
+        hbox_btns = QHBoxLayout()
+        hbox_btns.addWidget(self.auto_next)
+        hbox_btns.addWidget(self.auto_submit)
+        hbox_btns.addWidget(self.auto_finish)
+        hbox_btns.addWidget(btn_stop)
+        hbox_btns.addStretch()
+        hbox_btns.addWidget(self.cb_website)
+        hbox_btns.addWidget(self.cb_offline)
+        hbox_btns.addWidget(self.cb_mov)
+        hbox_btns.addWidget(self.fill_forms_btn)
+        hbox_btns.addWidget(self.refresh_btn)
+        autofill_container.addLayout(hbox_btns)
+
+        self.command_log = QTextEdit()
+        self.command_log.setReadOnly(True)
+        self.command_log.setMinimumHeight(50)
+        self.command_log.setMaximumHeight(100)
+        autofill_container.addWidget(self.command_log)
+
+        autofill_container.addWidget(btn_auto_fill)
+
+        self.sizer.addWidget(scroll_area, 6)
+        crud_w = QWidget()
+        crud_w.setLayout(crud_container)
+        self.sizer.addWidget(crud_w, 3)
+
+        autofill_w = QWidget()
+        autofill_w.setLayout(autofill_container)
+        self.sizer.addWidget(autofill_w, 1)
+
+        # Connect thread-safe signals
+        self._sig_log.connect(self.command_log.append)
+        self._sig_set_running.connect(self.set_running_flag)
+        self._sig_reload_person.connect(self.load_data_person)
+        self._sig_select_first.connect(self.select_first_item)
+        self._sig_msg_box.connect(self._show_msg_box)
 
         self.on_check_pickle()
-
         self.load_data_person()
         self.load_data_worker()
 
-    def on_choice_change_client(self, event):
-        bday_wx = self.client_bday.GetValue()
+    def _show_msg_box(self, title, message, kind):
+        if kind == "error":
+            QMessageBox.critical(self, title, message)
+        else:
+            QMessageBox.information(self, title, message)
 
-        bday_date = datetime(bday_wx.GetYear(), bday_wx.GetMonth() + 1, bday_wx.GetDay())
+    def on_choice_change_client(self, index=None):
+        bday = self.client_bday.date()
+        bday_date = datetime(bday.year(), bday.month(), bday.day())
+        today = datetime.today()
+        age_value = today.year - bday_date.year - ((today.month, today.day) < (bday_date.month, bday_date.day))
+        if age_value >= 60:
+            self.target_sector.setCurrentIndex(3)
+        elif 13 <= age_value <= 19:
+            self.target_sector.setCurrentIndex(5)
+        elif age_value < 13:
+            self.target_sector.setCurrentIndex(4)
+        else:
+            if self.client_gender.currentText() == "Female":
+                self.target_sector.setCurrentIndex(1)
+            else:
+                self.target_sector.setCurrentIndex(0)
 
+    def on_choice_change_bene(self, index=None):
+        bday = self.bene_bday.date()
+        bday_date = datetime(bday.year(), bday.month(), bday.day())
+        today = datetime.today()
+        age_value = today.year - bday_date.year - ((today.month, today.day) < (bday_date.month, bday_date.day))
+        if age_value >= 60:
+            self.target_sector_bene.setCurrentIndex(3)
+        elif 13 <= age_value <= 19:
+            self.target_sector_bene.setCurrentIndex(5)
+        elif age_value < 13:
+            self.target_sector_bene.setCurrentIndex(4)
+        else:
+            if self.bene_gender.currentText() == "Female":
+                self.target_sector_bene.setCurrentIndex(1)
+            else:
+                self.target_sector_bene.setCurrentIndex(0)
+
+    def c_compute_age(self, date=None):
+        bday = self.client_bday.date()
+        bday_date = datetime(bday.year(), bday.month(), bday.day())
         today = datetime.today()
         age_value = today.year - bday_date.year - ((today.month, today.day) < (bday_date.month, bday_date.day))
 
         if age_value >= 60:
-            self.target_sector.SetSelection(3)
+            self.target_sector.setCurrentIndex(3)
         elif 13 <= age_value <= 19:
-            self.target_sector.SetSelection(5)
+            self.target_sector.setCurrentIndex(5)
         elif age_value < 13:
-            self.target_sector.SetSelection(4)
+            self.target_sector.setCurrentIndex(4)
         else:
-            if self.client_gender.GetStringSelection() == "Female":
-                self.target_sector.SetSelection(1)
+            if self.client_gender.currentText() == "Female":
+                self.target_sector.setCurrentIndex(1)
             else:
-                self.target_sector.SetSelection(0)
+                self.target_sector.setCurrentIndex(0)
+        self.client_age.setText(str(age_value))
 
-    def on_choice_change_bene(self, event):
-        bday_wx = self.bene_bday.GetValue()
-
-        bday_date = datetime(bday_wx.GetYear(), bday_wx.GetMonth() + 1, bday_wx.GetDay())
-
+    def b_compute_age(self, date=None):
+        bday = self.bene_bday.date()
+        bday_date = datetime(bday.year(), bday.month(), bday.day())
         today = datetime.today()
         age_value = today.year - bday_date.year - ((today.month, today.day) < (bday_date.month, bday_date.day))
 
         if age_value >= 60:
-            self.target_sector_bene.SetSelection(3)
+            self.target_sector_bene.setCurrentIndex(3)
         elif 13 <= age_value <= 19:
-            self.target_sector_bene.SetSelection(5)
+            self.target_sector_bene.setCurrentIndex(5)
         elif age_value < 13:
-            self.target_sector_bene.SetSelection(4)
+            self.target_sector_bene.setCurrentIndex(4)
         else:
-            if self.bene_gender.GetStringSelection() == "Female":
-                self.target_sector_bene.SetSelection(1)
+            if self.bene_gender.currentText() == "Female":
+                self.target_sector_bene.setCurrentIndex(1)
             else:
-                self.target_sector_bene.SetSelection(0)
-
-    def c_compute_age(self, event):
-        """Compute age based on selected birthday."""
-
-        bday_wx = self.client_bday.GetValue()
-        bday_date = datetime(bday_wx.GetYear(), bday_wx.GetMonth() + 1, bday_wx.GetDay())
-
-        today = datetime.today()
-        age_value = today.year - bday_date.year - ((today.month, today.day) < (bday_date.month, bday_date.day))
-
-        if age_value >= 60:
-            self.target_sector.SetSelection(3)
-        elif 13 <= age_value <= 19:
-            self.target_sector.SetSelection(5)
-        elif age_value < 13:
-            self.target_sector.SetSelection(4)
-        else:
-            if self.client_gender.GetStringSelection() == "Female":
-                self.target_sector.SetSelection(1)
-            else:
-                self.target_sector.SetSelection(0)
-
-        self.client_age.SetValue(str(age_value))
-
-    def b_compute_age(self, event):
-        """Compute age based on selected birthday."""
-
-        bday_wx = self.bene_bday.GetValue()
-        bday_date = datetime(bday_wx.GetYear(), bday_wx.GetMonth() + 1, bday_wx.GetDay())
-
-        today = datetime.today()
-        age_value = today.year - bday_date.year - ((today.month, today.day) < (bday_date.month, bday_date.day))
-
-        if age_value >= 60:
-            self.target_sector_bene.SetSelection(3)
-        elif 13 <= age_value <= 19:
-            self.target_sector_bene.SetSelection(5)
-        elif age_value < 13:
-            self.target_sector_bene.SetSelection(4)
-        else:
-            if self.bene_gender.GetStringSelection() == "Female":
-                self.target_sector_bene.SetSelection(1)
-            else:
-                self.target_sector_bene.SetSelection(0)
-
-        self.bene_age.SetValue(str(age_value))
+                self.target_sector_bene.setCurrentIndex(0)
+        self.bene_age.setText(str(age_value))
 
     def set_running_flag(self, value):
         self.is_running = value
 
-    def on_button_click(self, event):
+    def on_button_click(self, event=None):
         self.on_save_data()
-
         if self.is_running:
-            self.command_log.AppendText("Task already running... Please wait.\n")
+            self.command_log.append("Task already running... Please wait.")
             return
-
-        self.is_running = True  # Set flag to prevent re-clicking
-        # Start a new thread to run the on_fill_up function
-        self.command_log.AppendText("Task started... Please wait.\n")
-        thread = threading.Thread(target=self.on_fill_up, daemon=True)
-        thread.start()
+        self.is_running = True
+        self.command_log.append("Task started... Please wait.")
+        threading.Thread(target=self.on_fill_up, daemon=True).start()
 
     def on_check_pickle(self):
         file_path = "data-new.pkl"
@@ -1359,255 +1019,182 @@ class MyFrame(wx.Frame):
             self.on_save_data()
 
     def on_load_data(self):
-
-        # Load from file
         with open("data-new.pkl", "rb") as file:
             self.loaded_data = pickle.load(file)
-        print("Loaded Data:", self.loaded_data)
-
-        # basic info
-        self.mode_of_admission.SetSelection(self.loaded_data.get("mode_of_admission"))
-        self.encoder_name.SetValue(self.loaded_data.get("encoder_name"))
-        set_date_value(self.encoded_date, self.loaded_data.get("encoded_date"))
-
-        # assistance info
-        self.auto_next.SetValue(self.loaded_data.get("auto_next"))
-        self.auto_submit.SetValue(self.loaded_data.get("auto_submit"))
-        self.thru_firstname.SetValue(self.loaded_data.get("thru_firstname"))
-        self.target_sector.SetSelection(self.loaded_data.get("target_sector"))
-        self.financial_assist.SetSelection(self.loaded_data.get("financial_assist"))
-
-        self.mode_release.SetSelection(self.loaded_data.get("mode_release"))
-
-        self.amount.SetValue(self.loaded_data.get("amount"))
-        self.fund_source.SetSelection(self.loaded_data.get("fund_source"))
-        self.sw_lname.SetValue(self.loaded_data.get("sw_lname"))
-        self.sw_fname.SetValue(self.loaded_data.get("sw_fname"))
-        self.sw_mname.SetValue(self.loaded_data.get("sw_mname"))
-        set_date_value(self.interview_date, self.loaded_data.get("interview_date"))
-
-        # client
-        self.client_relationship.SetSelection(self.loaded_data.get("client_relationship"))
-
-        self.client_lastname.SetValue(self.loaded_data.get("client_lastname"))
-        self.client_firstname.SetValue(self.loaded_data.get("client_firstname"))
-        self.client_middlename.SetValue(self.loaded_data.get("client_middlename"))
-
-        self.client_ext.SetValue(self.loaded_data.get("client_ext"))
-
-        self.client_gender.SetSelection(self.loaded_data.get("client_gender"))
-
-        set_date_value(self.client_bday, self.loaded_data.get("client_bday"))
-        self.client_age.SetValue(self.loaded_data.get("client_age"))
-
-        self.client_contact_no.SetValue(self.loaded_data.get("client_contact_no"))
-        self.client_civil_status.SetSelection(self.loaded_data.get("client_civil_status"))
-
-        self.client_house_street.SetValue(self.loaded_data.get("client_house_street"))
-        self.client_barangay.SetValue(self.loaded_data.get("client_barangay"))
-        self.client_city.SetSelection(self.loaded_data.get("client_city"))
-
-        # Bene
-        self.bene_relationship.SetSelection(self.loaded_data.get("bene_relationship"))
-
-        self.bene_lastname.SetValue(self.loaded_data.get("bene_lastname"))
-        self.bene_firstname.SetValue(self.loaded_data.get("bene_firstname"))
-        self.bene_middlename.SetValue(self.loaded_data.get("bene_middlename"))
-        self.bene_ext.SetValue(self.loaded_data.get("bene_ext"))
-
-        self.bene_gender.SetSelection(self.loaded_data.get("bene_gender"))
-
-        set_date_value(self.bene_bday, self.loaded_data.get("bene_bday"))
-        self.bene_age.SetValue(self.loaded_data.get("bene_age"))
-
-        self.bene_contact_no.SetValue(self.loaded_data.get("bene_contact_no"))
-        self.bene_civil_status.SetSelection(self.loaded_data.get("bene_civil_status"))
-
-        self.bene_house_street.SetValue(self.loaded_data.get("bene_house_street"))
-        self.bene_barangay.SetValue(self.loaded_data.get("bene_barangay"))
-        self.bene_city.SetSelection(self.loaded_data.get("bene_city"))
-
-        self.has_beneficiary.SetValue(self.loaded_data.get("has_beneficiary"))
-
-        self.cb_encoded.SetValue(self.loaded_data.get("cb_encoded"))
-
-        self.auto_finish.SetValue(self.loaded_data.get("auto_finish"))
-
-        self.selected_person_id = self.loaded_data.get("selected_id")
-
-        #encode_id
-        self.encode_id.SetValue(str(self.selected_person_id))
+        d = self.loaded_data
+        self.mode_of_admission.setCurrentIndex(d.get("mode_of_admission", 1))
+        self.encoder_name.setText(d.get("encoder_name", ""))
+        set_date_value(self.encoded_date, d.get("encoded_date", "2000-01-01"))
+        self.auto_next.setChecked(d.get("auto_next", False))
+        self.auto_submit.setChecked(d.get("auto_submit", False))
+        self.thru_firstname.setChecked(d.get("thru_firstname", False))
+        self.target_sector.setCurrentIndex(d.get("target_sector", 0))
+        self.financial_assist.setCurrentIndex(d.get("financial_assist", 0))
+        self.mode_release.setCurrentIndex(d.get("mode_release", 0))
+        self.amount.setText(d.get("amount", ""))
+        self.fund_source.setCurrentIndex(d.get("fund_source", 0))
+        self.sw_lname.setText(d.get("sw_lname", ""))
+        self.sw_fname.setText(d.get("sw_fname", ""))
+        self.sw_mname.setText(d.get("sw_mname", ""))
+        set_date_value(self.interview_date, d.get("interview_date", "2000-01-01"))
+        self.client_relationship.setCurrentIndex(d.get("client_relationship", 0))
+        self.client_lastname.setText(d.get("client_lastname", ""))
+        self.client_firstname.setText(d.get("client_firstname", ""))
+        self.client_middlename.setText(d.get("client_middlename", ""))
+        self.client_ext.setText(d.get("client_ext", ""))
+        self.client_gender.setCurrentIndex(d.get("client_gender", 0))
+        set_date_value(self.client_bday, d.get("client_bday", "2000-01-01"))
+        self.client_age.setText(d.get("client_age", ""))
+        self.client_contact_no.setText(d.get("client_contact_no", ""))
+        self.client_civil_status.setCurrentIndex(d.get("client_civil_status", 0))
+        self.client_house_street.setText(d.get("client_house_street", ""))
+        self.client_barangay.setText(d.get("client_barangay", ""))
+        self.client_city.setCurrentIndex(d.get("client_city", 0))
+        self.bene_relationship.setCurrentIndex(d.get("bene_relationship", 0))
+        self.bene_lastname.setText(d.get("bene_lastname", ""))
+        self.bene_firstname.setText(d.get("bene_firstname", ""))
+        self.bene_middlename.setText(d.get("bene_middlename", ""))
+        self.bene_ext.setText(d.get("bene_ext", ""))
+        self.bene_gender.setCurrentIndex(d.get("bene_gender", 0))
+        set_date_value(self.bene_bday, d.get("bene_bday", "2000-01-01"))
+        self.bene_age.setText(d.get("bene_age", ""))
+        self.bene_contact_no.setText(d.get("bene_contact_no", ""))
+        self.bene_civil_status.setCurrentIndex(d.get("bene_civil_status", 0))
+        self.bene_house_street.setText(d.get("bene_house_street", ""))
+        self.bene_barangay.setText(d.get("bene_barangay", ""))
+        self.bene_city.setCurrentIndex(d.get("bene_city", 0))
+        self.has_beneficiary.setChecked(d.get("has_beneficiary", False))
+        self.cb_encoded.setChecked(d.get("cb_encoded", False))
+        self.auto_finish.setChecked(d.get("auto_finish", False))
+        self.selected_person_id = d.get("selected_id")
+        self.encode_id.setText(str(self.selected_person_id or ""))
 
     def on_save_data(self):
-        self.data = {}
-
-        # basic info
-        self.data["mode_of_admission"] = self.mode_of_admission.GetSelection()
-        self.data["encoder_name"] = self.encoder_name.GetValue()
-        self.data["encoded_date"] = get_date_value(self.encoded_date)
-
-        # assistance info
-        self.data["auto_next"] = self.auto_next.GetValue()
-        self.data["auto_submit"] = self.auto_submit.GetValue()
-        self.data["thru_firstname"] = self.thru_firstname.GetValue()
-        self.data["target_sector"] = self.target_sector.GetSelection()
-        self.data["financial_assist"] = self.financial_assist.GetSelection()
-
-        self.data["mode_release"] = self.mode_release.GetSelection()
-        
-        self.data["amount"] = self.amount.GetValue()
-        self.data["fund_source"] = self.fund_source.GetSelection()
-        self.data["sw_lname"] = self.sw_lname.GetValue()
-        self.data["sw_fname"] = self.sw_fname.GetValue()
-        self.data["sw_mname"] = self.sw_mname.GetValue()
-        self.data["interview_date"] = get_date_value(self.interview_date)
-
-        # client
-        self.data["client_relationship"] = self.client_relationship.GetSelection()
-
-        self.data["client_lastname"] = self.client_lastname.GetValue()
-        self.data["client_firstname"] = self.client_firstname.GetValue()
-        self.data["client_middlename"] = self.client_middlename.GetValue()
-        self.data["client_ext"] = self.client_ext.GetValue()
-
-        self.data["client_gender"] = self.client_gender.GetSelection()
-
-        self.data["client_bday"] = get_date_value(self.client_bday)
-        self.data["client_age"] = self.client_age.GetValue()
-
-        self.data["client_contact_no"] = self.client_contact_no.GetValue()
-        self.data["client_civil_status"] = self.client_civil_status.GetSelection()
-
-        self.data["client_house_street"] = self.client_house_street.GetValue()
-        self.data["client_barangay"] = self.client_barangay.GetValue()
-        self.data["client_city"] = self.client_city.GetSelection()
-
-        # Bene
-        self.data["bene_relationship"] = self.bene_relationship.GetSelection()
-
-        self.data["bene_lastname"] = self.bene_lastname.GetValue()
-        self.data["bene_firstname"] = self.bene_firstname.GetValue()
-        self.data["bene_middlename"] = self.bene_middlename.GetValue()
-        self.data["bene_ext"] = self.bene_ext.GetValue()
-
-        self.data["bene_gender"] = self.bene_gender.GetSelection()
-
-        self.data["bene_bday"] = get_date_value(self.bene_bday)
-        self.data["bene_age"] = self.bene_age.GetValue()
-
-        self.data["bene_contact_no"] = self.bene_contact_no.GetValue()
-        self.data["bene_civil_status"] = self.bene_civil_status.GetSelection()
-
-        self.data["bene_house_street"] = self.bene_house_street.GetValue()
-        self.data["bene_barangay"] = self.bene_barangay.GetValue()
-        self.data["bene_city"] = self.bene_city.GetSelection()
-
-        self.data["has_beneficiary"] = self.has_beneficiary.GetValue()
-        self.data["cb_encoded"] = self.cb_encoded.GetValue()
-
-        self.data["auto_finish"] =self.auto_finish.GetValue()
-
-        self.data["selected_id"] = self.encode_id.GetValue()
-
-        # Save to file
+        self.data = {
+            "mode_of_admission": self.mode_of_admission.currentIndex(),
+            "encoder_name": self.encoder_name.text(),
+            "encoded_date": get_date_value(self.encoded_date),
+            "auto_next": self.auto_next.isChecked(),
+            "auto_submit": self.auto_submit.isChecked(),
+            "thru_firstname": self.thru_firstname.isChecked(),
+            "target_sector": self.target_sector.currentIndex(),
+            "financial_assist": self.financial_assist.currentIndex(),
+            "mode_release": self.mode_release.currentIndex(),
+            "amount": self.amount.text(),
+            "fund_source": self.fund_source.currentIndex(),
+            "sw_lname": self.sw_lname.text(),
+            "sw_fname": self.sw_fname.text(),
+            "sw_mname": self.sw_mname.text(),
+            "interview_date": get_date_value(self.interview_date),
+            "client_relationship": self.client_relationship.currentIndex(),
+            "client_lastname": self.client_lastname.text(),
+            "client_firstname": self.client_firstname.text(),
+            "client_middlename": self.client_middlename.text(),
+            "client_ext": self.client_ext.text(),
+            "client_gender": self.client_gender.currentIndex(),
+            "client_bday": get_date_value(self.client_bday),
+            "client_age": self.client_age.text(),
+            "client_contact_no": self.client_contact_no.text(),
+            "client_civil_status": self.client_civil_status.currentIndex(),
+            "client_house_street": self.client_house_street.text(),
+            "client_barangay": self.client_barangay.text(),
+            "client_city": self.client_city.currentIndex(),
+            "bene_relationship": self.bene_relationship.currentIndex(),
+            "bene_lastname": self.bene_lastname.text(),
+            "bene_firstname": self.bene_firstname.text(),
+            "bene_middlename": self.bene_middlename.text(),
+            "bene_ext": self.bene_ext.text(),
+            "bene_gender": self.bene_gender.currentIndex(),
+            "bene_bday": get_date_value(self.bene_bday),
+            "bene_age": self.bene_age.text(),
+            "bene_contact_no": self.bene_contact_no.text(),
+            "bene_civil_status": self.bene_civil_status.currentIndex(),
+            "bene_house_street": self.bene_house_street.text(),
+            "bene_barangay": self.bene_barangay.text(),
+            "bene_city": self.bene_city.currentIndex(),
+            "has_beneficiary": self.has_beneficiary.isChecked(),
+            "cb_encoded": self.cb_encoded.isChecked(),
+            "auto_finish": self.auto_finish.isChecked(),
+            "selected_id": self.encode_id.text(),
+        }
         with open("data-new.pkl", "wb") as file:
             pickle.dump(self.data, file)
 
-    def on_button_clear_all(self, event):
-        self.client_lastname.SetValue("")
+    def on_button_clear_all(self, event=None):
+        for w in [self.client_lastname, self.client_firstname, self.client_middlename,
+                  self.client_contact_no, self.client_age, self.client_house_street,
+                  self.client_barangay, self.bene_lastname, self.bene_firstname,
+                  self.bene_middlename, self.bene_contact_no, self.bene_age,
+                  self.bene_house_street, self.bene_barangay]:
+            w.setText("")
+        for w in [self.client_gender, self.client_civil_status, self.client_city,
+                  self.bene_gender, self.bene_civil_status, self.bene_city]:
+            w.setCurrentIndex(-1)
+        self.command_log.append("All fields have been cleared.")
 
-        self.client_firstname.SetValue("")
-        self.client_middlename.SetValue("")
-
-        self.client_contact_no.SetValue("")
-        self.client_age.SetValue("")
-
-        self.client_house_street.SetValue("")
-        self.client_barangay.SetValue("")
-
-        self.client_gender.SetSelection(-1)
-        self.client_civil_status.SetSelection(-1)
-        self.client_city.SetSelection(-1)
-
-        self.bene_lastname.SetValue("")
-        self.bene_firstname.SetValue("")
-        self.bene_middlename.SetValue("")
-
-        self.bene_contact_no.SetValue("")
-        self.bene_age.SetValue("")
-
-        self.bene_house_street.SetValue("")
-        self.bene_barangay.SetValue("")
-
-        self.bene_gender.SetSelection(-1)
-        self.bene_civil_status.SetSelection(-1)
-        self.bene_city.SetSelection(-1)
-
-        self.command_log.AppendText("All fields have been cleared.\n")
-
-    def on_button_save(self, event):
+    def on_button_save(self, event=None):
         data = {}
         # basic info
-        data["mode_of_admission"] = self.mode_of_admission.GetSelection()
-        data["encoder_name"] = self.encoder_name.GetValue()
+        data["mode_of_admission"] = self.mode_of_admission.currentIndex()
+        data["encoder_name"] = self.encoder_name.text()
         data["encoded_date"] = get_date_value(self.encoded_date)
 
         # assistance info
-        data["auto_next"] = self.auto_next.GetValue()
-        data["auto_submit"] = self.auto_submit.GetValue()
-        data["thru_firstname"] = self.thru_firstname.GetValue()
-        data["target_sector"] = self.target_sector.GetSelection()
-        data["financial_assist"] = self.financial_assist.GetSelection()
+        data["auto_next"] = self.auto_next.isChecked()
+        data["auto_submit"] = self.auto_submit.isChecked()
+        data["thru_firstname"] = self.thru_firstname.isChecked()
+        data["target_sector"] = self.target_sector.currentIndex()
+        data["financial_assist"] = self.financial_assist.currentIndex()
 
-        data["mode_release"] = self.mode_release.GetSelection()
-        
-        data["amount"] = self.amount.GetValue()
-        data["fund_source"] = self.fund_source.GetSelection()
-        data["sw_lname"] = self.sw_lname.GetValue()
-        data["sw_fname"] = self.sw_fname.GetValue()
-        data["sw_mname"] = self.sw_mname.GetValue()
+        data["mode_release"] = self.mode_release.currentIndex()
+
+        data["amount"] = self.amount.text()
+        data["fund_source"] = self.fund_source.currentIndex()
+        data["sw_lname"] = self.sw_lname.text()
+        data["sw_fname"] = self.sw_fname.text()
+        data["sw_mname"] = self.sw_mname.text()
         data["interview_date"] = get_date_value(self.interview_date)
 
         # client
-        data["client_relationship"] = self.client_relationship.GetSelection()
+        data["client_relationship"] = self.client_relationship.currentIndex()
 
-        data["client_lastname"] = self.client_lastname.GetValue()
-        data["client_firstname"] = self.client_firstname.GetValue()
-        data["client_middlename"] = self.client_middlename.GetValue()
+        data["client_lastname"] = self.client_lastname.text()
+        data["client_firstname"] = self.client_firstname.text()
+        data["client_middlename"] = self.client_middlename.text()
 
-        data["client_gender"] = self.client_gender.GetSelection()
+        data["client_gender"] = self.client_gender.currentIndex()
 
         data["client_bday"] = get_date_value(self.client_bday)
-        data["client_age"] = self.client_age.GetValue()
+        data["client_age"] = self.client_age.text()
 
-        data["client_contact_no"] = self.client_contact_no.GetValue()
-        data["client_civil_status"] = self.client_civil_status.GetSelection()
+        data["client_contact_no"] = self.client_contact_no.text()
+        data["client_civil_status"] = self.client_civil_status.currentIndex()
 
-        data["client_house_street"] = self.client_house_street.GetValue()
-        data["client_barangay"] = self.client_barangay.GetValue()
-        data["client_city"] = self.client_city.GetSelection()
+        data["client_house_street"] = self.client_house_street.text()
+        data["client_barangay"] = self.client_barangay.text()
+        data["client_city"] = self.client_city.currentIndex()
 
         # Bene
-        data["bene_relationship"] = self.bene_relationship.GetSelection()
+        data["bene_relationship"] = self.bene_relationship.currentIndex()
 
-        data["bene_lastname"] = self.bene_lastname.GetValue()
-        data["bene_firstname"] = self.bene_firstname.GetValue()
-        data["bene_middlename"] = self.bene_middlename.GetValue()
+        data["bene_lastname"] = self.bene_lastname.text()
+        data["bene_firstname"] = self.bene_firstname.text()
+        data["bene_middlename"] = self.bene_middlename.text()
 
-        data["bene_gender"] = self.bene_gender.GetSelection()
+        data["bene_gender"] = self.bene_gender.currentIndex()
 
         data["bene_bday"] = get_date_value(self.bene_bday)
-        data["bene_age"] = self.bene_age.GetValue()
+        data["bene_age"] = self.bene_age.text()
 
-        data["bene_contact_no"] = self.bene_contact_no.GetValue()
-        data["bene_civil_status"] = self.bene_civil_status.GetSelection()
+        data["bene_contact_no"] = self.bene_contact_no.text()
+        data["bene_civil_status"] = self.bene_civil_status.currentIndex()
 
-        data["bene_house_street"] = self.bene_house_street.GetValue()
-        data["bene_barangay"] = self.bene_barangay.GetValue()
-        data["bene_city"] = self.bene_city.GetSelection()
+        data["bene_house_street"] = self.bene_house_street.text()
+        data["bene_barangay"] = self.bene_barangay.text()
+        data["bene_city"] = self.bene_city.currentIndex()
 
-        data["has_beneficiary"] = self.has_beneficiary.GetValue()
-        data["cb_encoded"] = self.cb_encoded.GetValue()
+        data["has_beneficiary"] = self.has_beneficiary.isChecked()
+        data["cb_encoded"] = self.cb_encoded.isChecked()
 
         data["selected_id"] = self.selected_person_id
 
@@ -1628,56 +1215,49 @@ class MyFrame(wx.Frame):
             # Write the data row
             writer.writerow(data)
 
-        self.command_log.AppendText(f"Data saved successfully to {csv_file}\n")
+        self.command_log.append(f"Data saved successfully to {csv_file}")
 
     def on_refresh(self, event=None):
-        if self.cb_website.GetValue() or self.cb_offline.GetValue() or self.cb_mov.GetValue():
-
-            # Attach to an existing Chrome session (Make sure Chrome is running with debugging mode)
+        if self.cb_website.isChecked() or self.cb_offline.isChecked() or self.cb_mov.isChecked():
             chrome_options = webdriver.ChromeOptions()
-            chrome_options.debugger_address = "localhost:9222"  # Attach to existing Chrome session
+            chrome_options.debugger_address = "localhost:9222"
+            driver = webdriver.Chrome(options=chrome_options)
 
-            driver = webdriver.Chrome(options=chrome_options)  # Open Selenium with existing Chrome session
-
-            if self.cb_mov.GetValue():
+            if self.cb_mov.isChecked():
                 if self.switch_to_tab(driver, mov_url):
                     self.clickAddButton(driver, "Submit another response")
                 else:
-                    self.command_log.AppendText("URL not found in any open tab.\n")
-
-            if self.cb_offline.GetValue():
+                    self.command_log.append("URL not found in any open tab.")
+            if self.cb_offline.isChecked():
                 if self.switch_to_tab(driver, offline_url):
                     self.clickAddButton(driver, "Submit another response")
                 else:
-                    self.command_log.AppendText("URL not found in any open tab.\n")
-
-            if self.cb_website.GetValue():
+                    self.command_log.append("URL not found in any open tab.")
+            if self.cb_website.isChecked():
                 if self.switch_to_tab(driver, website_url):
                     self.clickAddButton(driver, "Home")
                 else:
-                    self.command_log.AppendText("URL not found in any open tab.\n")
-
+                    self.command_log.append("URL not found in any open tab.")
             driver.quit()
-            wx.CallAfter(self.command_log.AppendText, "Task completed!\n")
-
+            self._sig_log.emit("Task completed!")
         else:
-            self.command_log.AppendText("Please select a checkbox(s). \n")
+            self.command_log.append("Please select a checkbox(s).")
 
     def on_fill_up(self):
-        if self.list_ctrl.GetItemCount() <= 0:
+        if self.list_ctrl.rowCount() <= 0:
             self.stop_requested = True
 
         if self.stop_requested:
             self.stop_requested = False
-            wx.CallAfter(self.command_log.AppendText, "Task was stopped.\n")
-            wx.CallAfter(self.set_running_flag, False)  # Reset flag on completion
+            self._sig_log.emit("Task was stopped.")
+            self._sig_set_running.emit(False)  # Reset flag on completion
             return
 
         is_end_mov = False
         is_end_offline = False
         is_end_website = False
 
-        if self.cb_website.GetValue() or self.cb_offline.GetValue() or self.cb_mov.GetValue():
+        if self.cb_website.isChecked() or self.cb_offline.isChecked() or self.cb_mov.isChecked():
 
             # Attach to an existing Chrome session (Make sure Chrome is running with debugging mode)
             chrome_options = webdriver.ChromeOptions()
@@ -1686,45 +1266,45 @@ class MyFrame(wx.Frame):
             self.driver = webdriver.Chrome(options=chrome_options)  # Open Selenium with existing Chrome session
 
             # Get all currently open tabs
-            if self.cb_mov.GetValue():
+            if self.cb_mov.isChecked():
                 if self.switch_to_tab(self.driver, mov_url):
                     is_end_mov = self.is_end_of_g_form(self.driver)
                     if not is_end_mov :
                         self.on_fill_crims_mov(self.driver)
                 else:
-                    self.command_log.AppendText("URL not found in any open tab.\n")
+                    self.command_log.append("URL not found in any open tab.")
 
-            if self.cb_offline.GetValue():
+            if self.cb_offline.isChecked():
                 if self.switch_to_tab(self.driver, offline_url):
                     is_end_offline = self.is_end_of_g_form(self.driver)
                     if not is_end_offline:
                         self.on_fill_crims_offline(self.driver)
                 else:
-                    self.command_log.AppendText("URL not found in any open tab.\n")
+                    self.command_log.append("URL not found in any open tab.")
 
-            if self.cb_website.GetValue():
+            if self.cb_website.isChecked():
                 if self.switch_to_tab(self.driver, website_url):
                     is_end_website = self.is_end_of_website(self.driver)
                     if not is_end_website:
                         self.on_fill_crims_website(self.driver)
                 else:
-                    self.command_log.AppendText("URL not found in any open tab.\n")
+                    self.command_log.append("URL not found in any open tab.")
 
             self.driver.quit()
-            wx.CallAfter(self.command_log.AppendText, "Task completed!\n")
+            self._sig_log.emit("Task completed!")
 
         else:
-            self.command_log.AppendText("Please select a checkbox(s). \n")
+            self.command_log.append("Please select a checkbox(s).")
 
-        if self.auto_finish.GetValue() :
+        if self.auto_finish.isChecked() :
 
-            if (is_end_website == self.cb_website.GetValue()) and (is_end_mov == self.cb_mov.GetValue()) and (is_end_offline == self.cb_offline.GetValue()):
+            if (is_end_website == self.cb_website.isChecked()) and (is_end_mov == self.cb_mov.isChecked()) and (is_end_offline == self.cb_offline.isChecked()):
 
-                wx.CallAfter(self.set_running_flag, False)  # Reset flag on completion
+                self._sig_set_running.emit(False)  # Reset flag on completion
                 self.stop_requested = False
-                set_encoded(self.encode_id.GetValue(), True)
-                self.load_data_person()
-                self.select_first_item()
+                set_encoded(self.encode_id.text(), True)
+                self._sig_reload_person.emit()
+                self._sig_select_first.emit()
 
                 """ select next record """
                 """ trigger on fill up """
@@ -1739,14 +1319,14 @@ class MyFrame(wx.Frame):
                 time.sleep(1)
                 self.on_fill_up()
         else:
-            wx.CallAfter(self.set_running_flag, False)  # Reset flag on completion
+            self._sig_set_running.emit(False)  # Reset flag on completion
 
     def switch_to_tab(self, driver, url_part):
         for handle in driver.window_handles:
             driver.switch_to.window(handle)
 
             if url_part in driver.current_url:  # Check if the URL contains the desired string
-                # self.command_log.AppendText(f"Switched to tab: {driver.current_url}\n")
+                # self.command_log.append(f"Switched to tab: {driver.current_url}")
                 return True
         return False
 
@@ -1757,7 +1337,7 @@ class MyFrame(wx.Frame):
     def on_fill_crims_website(self, driver):
         try:
             if self.clickHrefButton(driver, "Add Client"):
-                c_full_name = f'{self.client_lastname.GetValue()} {self.client_firstname.GetValue()} {self.client_middlename.GetValue()}'
+                c_full_name = f'{self.client_lastname.text()} {self.client_firstname.text()} {self.client_middlename.text()}'
                 if self.hasASearchField(driver, c_full_name):
                     if self.searchResult(driver) :
                         self.clickAddButton(driver, "Add Client")
@@ -1778,12 +1358,12 @@ class MyFrame(wx.Frame):
 
             match self.getTitle(driver):
                 case "family composition":
-                    if self.auto_next.GetValue():
+                    if self.auto_next.isChecked():
                         self.clickNextButton(driver, "Next")
                         return None
                     return None
                 case "confirmation":
-                    if self.auto_next.GetValue():
+                    if self.auto_next.isChecked():
                         self.clickNextButton(driver, "Next")
                         return None
                     return None
@@ -1795,87 +1375,82 @@ class MyFrame(wx.Frame):
                         file_input = driver.find_element(By.ID, "user_file")
                         file_input.send_keys(file_path)  # Upload file
                     except NoSuchElementException:
-                        self.command_log.AppendText(f"Error: Element with File upload not found. \n")
+                        self.command_log.append(f"Error: Element with File upload not found. ")
                     except Exception as e:
-                        self.command_log.AppendText(f"Element not existing {e} \n")
+                        self.command_log.append(f"Element not existing {e} ")
                         return False
 
                     self.setTextField(driver, "cl_pcn", "0")
 
                     self.setTextField(driver, "queue_no", "0")
 
-                    self.setDropDown(driver, "select2-mode_of_admission-container", self.mode_of_admission.GetStringSelection())
+                    self.setDropDown(driver, "select2-mode_of_admission-container", self.mode_of_admission.currentText())
                     self.setDropDown(driver, "select2-cl_assisted_through-container", "Onsite")
                     self.setDropDown(driver, "select2-cl_typeid-container", "N/A")
                     self.setDropDown(driver, "select2-cl_referring_party-container", "Default Default Default")
 
-                    if not self.has_beneficiary.GetValue():
+                    if not self.has_beneficiary.isChecked():
                         self.setDropDown(driver, "select2-is_Self-container", "Yes")
                     else:
                         self.setDropDown(driver, "select2-is_Self-container", "No")
 
-                    self.setDropDown(driver, "select2-cl_category-container", self.target_sector.GetStringSelection())
+                    self.setDropDown(driver, "select2-cl_category-container", self.target_sector.currentText())
                     self.setDropDown(driver, "select2-cl_sub_category-container", "NONE OF THE ABOVE")
 
-                    self.setTextField(driver, "lname", self.client_lastname.GetValue())
-                    self.setTextField(driver, "fname", self.client_firstname.GetValue())
-                    self.setTextField(driver, "mname", self.client_middlename.GetValue())
-                    client_ext_value = self.client_ext.GetValue().lower()
+                    self.setTextField(driver, "lname", self.client_lastname.text())
+                    self.setTextField(driver, "fname", self.client_firstname.text())
+                    self.setTextField(driver, "mname", self.client_middlename.text())
+                    client_ext_value = self.client_ext.text().lower()
                     if client_ext_value != "":
-                        self.setTextField(driver, "xname", self.client_ext.GetValue())
+                        self.setTextField(driver, "xname", self.client_ext.text())
 
-                    self.setDate(driver, "birthdate", self.client_bday.GetValue())
+                    self.setDate(driver, "birthdate", self.client_bday.date())
 
-                    self.setDropDown(driver, "select2-sex-container", self.client_gender.GetStringSelection())
+                    self.setDropDown(driver, "select2-sex-container", self.client_gender.currentText())
 
-                    client_contact_value = self.client_contact_no.GetValue()
+                    client_contact_value = self.client_contact_no.text()
                     if client_contact_value == "" :
                         client_contact_value = "00000000000"
 
                     self.setTextField(driver, "contact_no", client_contact_value)
 
-                    relationship_caption = self.client_relationship.GetStringSelection()
+                    relationship_caption = self.client_relationship.currentText()
                     relationship_name = self.relationship_data_map[relationship_caption]
 
                     self.setDropDown(driver, "select2-relationship_bene-container", relationship_caption)
 
-                    civil_status_caption = self.client_civil_status.GetStringSelection()
+                    civil_status_caption = self.client_civil_status.currentText()
                     civil_status_name = self.civil_status_data_map[civil_status_caption]
 
                     self.setDropDown(driver, "select2-civil_status-container", civil_status_name)
 
-                    self.setTextField(driver, "purok_street", self.client_house_street.GetValue())
+                    self.setTextField(driver, "purok_street", self.client_house_street.text())
 
                     self.setDropDown(driver, "select2-region-container", "NCR [National Capital Region]")
 
-                    
-                    districtNCR = district_city.get(self.client_city.GetStringSelection(), "NCR THIRD DISTRICT")
+
+                    districtNCR = district_city.get(self.client_city.currentText(), "NCR THIRD DISTRICT")
 
                     self.setDropDown(driver, "select2-province-container", districtNCR)
 
-                    # if self.client_city.GetStringSelection() == "CITY OF QUEZON CITY":
-                    #     self.setDropDown(driver, "select2-province-container", "NCR SECOND DISTRICT")
-                    # else:
-                    #     self.setDropDown(driver, "select2-province-container", "NCR THIRD DISTRICT")
-
-                    if self.client_city.GetStringSelection() == "NONE OF THE ABOVE":
+                    if self.client_city.currentText() == "NONE OF THE ABOVE":
                         self.stop_requested = True
                         city_value = "NONE OF THE ABOVE"
-                    elif self.client_city.GetStringSelection() == "CITY OF CALOOCAN":
+                    elif self.client_city.currentText() == "CITY OF CALOOCAN":
                         city_value = "KALOOKAN CITY"
-                    elif self.client_city.GetStringSelection() == "CITY OF QUEZON CITY":
+                    elif self.client_city.currentText() == "CITY OF QUEZON CITY":
                         city_value = "QUEZON CITY"
                     else:
-                        city_value = self.client_city.GetStringSelection()
+                        city_value = self.client_city.currentText()
                     self.setDropDown(driver, "select2-city_muni-container", city_value)
 
-                    self.setDropDown(driver, "select2-barangay-container", self.client_barangay.GetValue())
+                    self.setDropDown(driver, "select2-barangay-container", self.client_barangay.text())
 
                     self.setDropDown(driver, "select2-occupation-container", "NONE OF THE ABOVE")
 
                     self.setTextField(driver, "salary", "0")
 
-                    if self.auto_next.GetValue() :
+                    if self.auto_next.isChecked() :
                         self.clickNextButton(driver, "Next")
                         return None
                     return None
@@ -1884,57 +1459,57 @@ class MyFrame(wx.Frame):
                     self.setDropDown(driver, "select2-b_assisted_through-container", "Onsite")
                     self.setDropDown(driver, "select2-id_type_id-container", "N/A")
 
-                    if self.has_beneficiary.GetValue():
+                    if self.has_beneficiary.isChecked():
                         self.selectCheckBox(driver, "uniform-same_add_client")
 
-                        self.setDropDown(driver, "select2-b_sex-container", self.bene_gender.GetStringSelection())
+                        self.setDropDown(driver, "select2-b_sex-container", self.bene_gender.currentText())
                         self.setDropDown(driver, "select2-b_civil_status-container",
-                                         self.bene_civil_status.GetStringSelection())
+                                         self.bene_civil_status.currentText())
                         self.setDropDown(driver, "select2-b_referring_party-container", "Default Default Default")
 
-                        self.setDate(driver, "b_birthdate", self.bene_bday.GetValue())
+                        self.setDate(driver, "b_birthdate", self.bene_bday.date())
 
-                        self.setTextField(driver, "b_lname", self.bene_lastname.GetValue())
-                        self.setTextField(driver, "b_fname", self.bene_firstname.GetValue())
-                        self.setTextField(driver, "b_mname", self.bene_middlename.GetValue())
-                        self.setTextField(driver, "b_xname", self.bene_ext.GetValue())
+                        self.setTextField(driver, "b_lname", self.bene_lastname.text())
+                        self.setTextField(driver, "b_fname", self.bene_firstname.text())
+                        self.setTextField(driver, "b_mname", self.bene_middlename.text())
+                        self.setTextField(driver, "b_xname", self.bene_ext.text())
 
                         self.setDropDown(driver, "select2-b_region-container", "NCR [National Capital Region]")
 
-                        districtNCR = district_city.get(self.client_city.GetStringSelection(), "NCR THIRD DISTRICT")
+                        districtNCR = district_city.get(self.client_city.currentText(), "NCR THIRD DISTRICT")
                         self.setDropDown(driver, "select2-b_province-container", districtNCR)
 
-                        if self.client_city.GetStringSelection() == "NONE OF THE ABOVE":
+                        if self.client_city.currentText() == "NONE OF THE ABOVE":
                             self.stop_requested = True
                             city_value = "NONE OF THE ABOVE"
-                        elif self.bene_city.GetStringSelection() == "CITY OF CALOOCAN":
+                        elif self.bene_city.currentText() == "CITY OF CALOOCAN":
                             city_value = "KALOOKAN CITY"
                         else:
-                            city_value = self.client_city.GetStringSelection()
+                            city_value = self.client_city.currentText()
                         self.setDropDown(driver, "select2-b_city_muni-container", city_value)
 
-                        self.setDropDown(driver, "select2-b_barangay-container", self.bene_barangay.GetValue())
+                        self.setDropDown(driver, "select2-b_barangay-container", self.bene_barangay.text())
 
-                        self.setTextField(driver, "b_purok_street", self.bene_house_street.GetValue())
-                        self.setTextField(driver, "b_contact_no", self.bene_contact_no.GetValue())
+                        self.setTextField(driver, "b_purok_street", self.bene_house_street.text())
+                        self.setTextField(driver, "b_contact_no", self.bene_contact_no.text())
                     else:
                         self.selectCheckBox(driver, "uniform-is_existing_self")
                         self.setDropDown(driver, "select2-b_referring_party-container", "Default Default Default")
 
-                    if self.auto_next.GetValue():
+                    if self.auto_next.isChecked():
                         self.clickNextButton(driver, "Next")
                         return None
                     return None
                 case "assessment":
-                    self.setDropDown(driver, "select2-bene_category-container", self.target_sector.GetStringSelection())
+                    self.setDropDown(driver, "select2-bene_category-container", self.target_sector.currentText())
                     self.setDropDown(driver, "select2-bene_sub_category-container", "NONE OF THE ABOVE")
 
                     value_string = ""
-                    if self.client_gender.GetStringSelection().lower() == "male":
+                    if self.client_gender.currentText().lower() == "male":
                         gender_string = "HIS"
                     else:
                         gender_string = "HER"
-                    match self.financial_assist.GetStringSelection().lower():
+                    match self.financial_assist.currentText().lower():
                         case "medical":
                             value_string = f"THE CLIENT SEEK'S MEDICAL ASSISTANCE TO AUGMENT {gender_string} MEDICAL EXPENSES"
                         case "transportation":
@@ -1946,7 +1521,7 @@ class MyFrame(wx.Frame):
 
                     self.setTextAreaField(driver, "problem_presented", value_string)
                     self.setTextAreaField(driver, "sw_assessment", value_string)
-                    if self.auto_next.GetValue() :
+                    if self.auto_next.isChecked() :
                         self.clickNextButton(driver, "Next")
                         return None
                     return None
@@ -1956,7 +1531,7 @@ class MyFrame(wx.Frame):
 
                     assistance_value = ""
                     purpose_value = ""
-                    match self.financial_assist.GetStringSelection().lower():
+                    match self.financial_assist.currentText().lower():
                         case "medical":
                             assistance_value = "Medical Assistance"
                             purpose_value = "MEDICAL EXPENSES"
@@ -1973,15 +1548,15 @@ class MyFrame(wx.Frame):
                     self.setDropDown(driver, "select2-FA2type_financial_assistance-container", assistance_value)
 
                     # need testing
-                    mode = self.mode_release.GetStringSelection().title()
+                    mode = self.mode_release.currentText().title()
                     self.setDropDown(driver, "select2-FA2mode_of_asssitance}-container", mode)
 
-                    fund_source_caption = self.fund_source.GetStringSelection()
+                    fund_source_caption = self.fund_source.currentText()
 
                     self.setDropDown(driver, "select2-FA2fund_source-container", fund_source_caption)
 
                     self.setTextField(driver, "FA[2][purpose]", purpose_value)
-                    self.setTextField(driver, "FA[2][amount_of_assistance]", self.amount.GetValue())
+                    self.setTextField(driver, "FA[2][amount_of_assistance]", self.amount.text())
 
                     try:
                         driver.implicitly_wait(10)
@@ -1995,7 +1570,7 @@ class MyFrame(wx.Frame):
                     except:
                         print("No alert present")
 
-                    if self.auto_next.GetValue() :
+                    if self.auto_next.isChecked() :
                         self.clickNextButton(driver, "Next")
                         try:
                             driver.implicitly_wait(10)
@@ -2021,43 +1596,38 @@ class MyFrame(wx.Frame):
                         return None
                     return None
                 case "approver":
-                    if self.thru_firstname.GetValue():
-                        if self.sw_mname.GetValue() == "" :
-                            sw_full_name = f'{self.sw_fname.GetValue()} {self.sw_lname.GetValue()}'
+                    if self.thru_firstname.isChecked():
+                        if self.sw_mname.text() == "" :
+                            sw_full_name = f'{self.sw_fname.text()} {self.sw_lname.text()}'
                         else:
-                            sw_full_name = f'{self.sw_fname.GetValue()} {self.sw_mname.GetValue()} {self.sw_lname.GetValue()}'
+                            sw_full_name = f'{self.sw_fname.text()} {self.sw_mname.text()} {self.sw_lname.text()}'
                     else:
-                        sw_full_name = f'{self.sw_lname.GetValue()} {self.sw_fname.GetValue()} {self.sw_mname.GetValue()}'
+                        sw_full_name = f'{self.sw_lname.text()} {self.sw_fname.text()} {self.sw_mname.text()}'
 
                     self.setDropDown(driver, "select2-assessed_by-container", sw_full_name)
 
 
-                    selected_index = self.approved_by.GetSelection()
-                    if selected_index != wx.NOT_FOUND:
-                        selected_key = self.approved_by.GetString(selected_index)
+                    selected_index = self.approved_by.currentIndex()
+                    if selected_index != -1:
+                        selected_key = self.approved_by.currentText()
                         selected_value = approved_by_list[selected_key]
-                        self.setDropDown(driver, "select2-approved_by-container", selected_value) 
-                    
+                        self.setDropDown(driver, "select2-approved_by-container", selected_value)
+
                     self.setDropDown(driver, "select2-status-container", "Approved")
-                    self.setDate(driver, "dt_assistanceProvided", self.interview_date.GetValue())
-                    if self.auto_submit.GetValue():
+                    self.setDate(driver, "dt_assistanceProvided", self.interview_date.date())
+                    if self.auto_submit.isChecked():
                         self.clickNextButton(driver, "Next")
                         return None
                     return None
             return None
         except Exception as e:
-            self.command_log.AppendText(f"Error in : {e} \n")
+            self.command_log.append(f"Error in : {e} ")
             return None
 
     def on_fill_crims_offline(self, driver):
         region = "NCR [National Capital Region]"
 
-        province = district_city.get(self.client_city.GetStringSelection(), "NCR THIRD DISTRICT")
-
-        # if self.client_city.GetStringSelection() == "CITY OF QUEZON CITY":
-        #     province = "NCR SECOND DISTRICT"
-        # else:
-        #     province = "NCR THIRD DISTRICT"
+        province = district_city.get(self.client_city.currentText(), "NCR THIRD DISTRICT")
 
         gformTitle = self.getGFormTitle(driver)
 
@@ -2068,22 +1638,22 @@ class MyFrame(wx.Frame):
 
         if gformTitle == "approved by":
 
-            selected_index = self.approved_by.GetSelection()
-            if selected_index != wx.NOT_FOUND:
-                selected_key = self.approved_by.GetString(selected_index)
+            selected_index = self.approved_by.currentIndex()
+            if selected_index != -1:
+                selected_key = self.approved_by.currentText()
                 selected_value = approved_by_list[selected_key]
-                self.setGFormRadioButton(driver, "", selected_key) 
-     
+                self.setGFormRadioButton(driver, "", selected_key)
+
             self.setGFormRadioButton(driver, "REGION ASSESS", "NCR (National Capital Region)")
             self.setGFormRadioButton(driver, "PAYEE", "N/A")
 
-            client_contact_value = self.client_contact_no.GetValue()
+            client_contact_value = self.client_contact_no.text()
             if client_contact_value == "":
                 self.setGFormRadioButton(driver, "CLIENT CONTACT NUMBER", "N/A")
             else:
                 self.setGFormRadioButtonOthers(driver, "CLIENT CONTACT NUMBER", client_contact_value)
 
-            bene_contact_value = self.has_beneficiary.GetValue()
+            bene_contact_value = self.has_beneficiary.isChecked()
             if bene_contact_value == "":
                 self.setGFormRadioButtonOthers(driver, "BENEFICIARY CONTACT NUMBER", bene_contact_value)
             else:
@@ -2091,10 +1661,10 @@ class MyFrame(wx.Frame):
 
             self.setGFormRadioButton(driver, "STATUS", "APPROVED")
 
-            if self.auto_submit.GetValue():
+            if self.auto_submit.isChecked():
                 self.clickSubmitButton(driver, "Submit")
         elif gformTitle == "beneficiary":
-            if not self.has_beneficiary.GetValue():
+            if not self.has_beneficiary.isChecked():
                 self.setGFormRadioButton(driver, "LASTNAME", "N/A")
                 self.setGFormRadioButton(driver, "FIRST NAME","N/A")
                 self.setGFormRadioButton(driver, "MIDDLE NAME", "N/A")
@@ -2106,50 +1676,47 @@ class MyFrame(wx.Frame):
                 self.setGFormRadioButton(driver, "CIVIL STATUS", "N/A")
                 date_str = "N/A"
             else:
-                date_str = self.bene_bday.GetValue().Format("%m-%d-%Y")
-                self.setGFormRadioButtonOthers(driver, "LASTNAME", self.bene_lastname.GetValue())
-                self.setGFormRadioButtonOthers(driver, "FIRST NAME", self.bene_firstname.GetValue())
-                self.setGFormRadioButtonOthers(driver, "MIDDLE NAME", self.bene_middlename.GetValue())
+                date_str = self.bene_bday.date().toString("MM-dd-yyyy")
+                self.setGFormRadioButtonOthers(driver, "LASTNAME", self.bene_lastname.text())
+                self.setGFormRadioButtonOthers(driver, "FIRST NAME", self.bene_firstname.text())
+                self.setGFormRadioButtonOthers(driver, "MIDDLE NAME", self.bene_middlename.text())
                 self.setGFormRadioButton(driver, "EXTENSION NAME", "N/A")
 
-                # date_str = self.bene_bday.GetValue().Format("%m-%d-%Y")
-                # self.setGFormRadioButtonOthers(driver, "BIRTHDAY", date_str)
-                self.setGFormRadioButtonOthers(driver, "AGE", self.bene_age.GetValue())
+                self.setGFormRadioButtonOthers(driver, "AGE", self.bene_age.text())
                 self.setGFormRadioButton(driver, "BENEFICIARY CATEGORY", "N/A")
-                self.setGFormRadioButton(driver, "SEX", self.bene_gender.GetStringSelection())
-                self.setGFormRadioButton(driver, "CIVIL STATUS", self.bene_civil_status.GetStringSelection())
+                self.setGFormRadioButton(driver, "SEX", self.bene_gender.currentText())
+                self.setGFormRadioButton(driver, "CIVIL STATUS", self.bene_civil_status.currentText())
 
-                self.setGFormDate(driver, "i50", self.bene_bday.GetValue())
+                self.setGFormDate(driver, "i50", self.bene_bday.date())
 
             self.setGFormTextField(driver, "i46 i47", date_str)
 
-            mode_of_release_string = self.mode_release.GetStringSelection()
+            mode_of_release_string = self.mode_release.currentText()
             self.setGFormRadioButton(driver, "MODE OF RELEASE", mode_of_release_string)
             self.setGFormRadioButton(driver, "DATE OF RELEASE", "2025")
             # i150 - INTERVIEW
             # i156 - DATE OF RELEASE
-            self.setGFormDate(driver, "i150", self.interview_date.GetValue())
-            self.setGFormDate(driver, "i156", self.interview_date.GetValue())
-            # self.setGFormDate(driver, "i149", self.interview_date.GetValue())
+            self.setGFormDate(driver, "i150", self.interview_date.date())
+            self.setGFormDate(driver, "i156", self.interview_date.date())
 
-            sw_lname_value = string.capwords(self.sw_lname.GetValue())
-            sw_fname_value = string.capwords(self.sw_fname.GetValue())
-            sw_mname_value = string.capwords(self.sw_mname.GetValue())
+            sw_lname_value = string.capwords(self.sw_lname.text())
+            sw_fname_value = string.capwords(self.sw_fname.text())
+            sw_mname_value = string.capwords(self.sw_mname.text())
             sw_mname_initial_value = sw_mname_value[0].upper() if sw_mname_value else ""
             sw_full_name = f'{sw_lname_value}, {sw_fname_value} {sw_mname_initial_value}.'
             self.setGFormDropDown(driver, "i157 i160", sw_full_name)
 
-            if self.auto_next.GetValue():
+            if self.auto_next.isChecked():
                 self.clickGFormButton(driver, "Next")
         elif gformTitle == "barangay and district":
-            self.setGFormTextField(driver, "i2 i3", self.client_barangay.GetValue())
+            self.setGFormTextField(driver, "i2 i3", self.client_barangay.text())
             self.setGFormDropDown(driver, "i6 i9", "I")
 
-            self.setGFormTextField(driver, "i22 i23", self.client_lastname.GetValue())
-            self.setGFormTextField(driver, "i12 i13", self.client_firstname.GetValue())
-            self.setGFormTextField(driver, "i17 i18", self.client_middlename.GetValue())
+            self.setGFormTextField(driver, "i22 i23", self.client_lastname.text())
+            self.setGFormTextField(driver, "i12 i13", self.client_firstname.text())
+            self.setGFormTextField(driver, "i17 i18", self.client_middlename.text())
 
-            client_ext_value = self.client_ext.GetValue().lower()
+            client_ext_value = self.client_ext.text().lower()
             if client_ext_value != "":
                 if client_ext_value.lower() in ["jr", "sr"] and not client_ext_value.endswith("."):
                     client_ext_value = client_ext_value + "."
@@ -2157,26 +1724,26 @@ class MyFrame(wx.Frame):
                 client_ext_value = "N/A"
             self.setGFormDropDown(driver, "i26 i29", client_ext_value.lower())  # extension name
 
-            self.setGFormDropDown(driver, "i31 i34", self.client_gender.GetStringSelection().upper())  # sex
+            self.setGFormDropDown(driver, "i31 i34", self.client_gender.currentText().upper())  # sex
 
-            civil_status_caption = self.client_civil_status.GetStringSelection()
+            civil_status_caption = self.client_civil_status.currentText()
             civil_status_name = self.civil_status_data_map[civil_status_caption]
 
             self.setGFormRadioButton(driver, "CIVIL STATUS", civil_status_caption)
 
-            self.setGFormDate(driver, "i61", self.client_bday.GetValue())
-            self.setGFormTextField(driver, "i63 i64", self.client_age.GetValue())
+            self.setGFormDate(driver, "i61", self.client_bday.date())
+            self.setGFormTextField(driver, "i63 i64", self.client_age.text())
 
             self.setGFormRadioButton(driver, "MODE OF ADMISSION", "WALK-IN")
 
-            self.setGFormTextField(driver, "i96 i97", self.amount.GetValue())
+            self.setGFormTextField(driver, "i96 i97", self.amount.text())
 
-            fund_source_caption = self.fund_source.GetStringSelection()
+            fund_source_caption = self.fund_source.currentText()
             fund_source_name = self.fund_source_data_map[fund_source_caption]
 
             self.setGFormRadioButton(driver, "FUND SOURCE", fund_source_name)
 
-            sector_value = self.target_sector.GetStringSelection()
+            sector_value = self.target_sector.currentText()
             if sector_value.lower() == "senior citizens" :
                 sector_value = "senior citizens (no subcategories)"
             #     SENIOR CITIZENS (no subcategories)
@@ -2184,7 +1751,7 @@ class MyFrame(wx.Frame):
 
             self.setGFormRadioButton(driver, "CLIENT SUB-CATEGORY", "Indigenous People")
             # "Medical", "Burial", "Transportation", "Cash Support", "Food Subsidy"
-            match self.financial_assist.GetStringSelection().lower():
+            match self.financial_assist.currentText().lower():
                 case "medical":
                     self.setGFormRadioButton(driver, "TYPE OF ASSISTANCE", "MEDICAL ASSISTANCE")
                     self.setGFormRadioButton(driver, "PROBLEM PRESENTED", "FOR MEDICAL EXPENSES")
@@ -2208,56 +1775,53 @@ class MyFrame(wx.Frame):
             self.setGFormRadioButton(driver, "OCCUPATION", "NONE OF THE ABOVE")
             self.setGFormRadioButton(driver, "SALARY", "0")
 
-            relationship_caption = self.client_relationship.GetStringSelection()
+            relationship_caption = self.client_relationship.currentText()
             relationship_name = self.relationship_data_map[relationship_caption]
 
-            # if self.client_relationship.GetStringSelection() == "Not Specified":
-            #     client_relationship_value = "SELF"
-            # else:
-            #     client_relationship_value = self.client_relationship.GetStringSelection()
             self.setGFormRadioButton(driver, "RELATIONSHIP TO BENEFICIARY", relationship_name)
-            if self.auto_next.GetValue():
+            if self.auto_next.isChecked():
                 self.clickGFormButton(driver, "Next")
         elif is_similar(gformTitle, province.lower()):
-            if self.client_city.GetStringSelection() == "NONE OF THE ABOVE":
+            if self.client_city.currentText() == "NONE OF THE ABOVE":
                 self.stop_requested = True
             else:
-                self.setGFormDropDown(driver, "i1 i4", self.client_city.GetStringSelection())
-                if self.auto_next.GetValue():
+                self.setGFormDropDown(driver, "i1 i4", self.client_city.currentText())
+                if self.auto_next.isChecked():
                     self.clickGFormButton(driver, "Next")
         elif is_similar(gformTitle, region.lower()):
             self.setGFormDropDown(driver, "i1 i4", province)
-            if self.auto_next.GetValue():
+            if self.auto_next.isChecked():
                 self.clickGFormButton(driver, "Next")
         else:
-            self.setGFormDate(driver, "i6", self.encoded_date.GetValue())
-            self.setGFormTextField(driver, "i8 i9", self.encoder_name.GetValue())
+            self.setGFormRecordEmailCheckbox(driver)
+            self.setGFormDate(driver, "i13", self.encoded_date.date())
+            self.setGFormTextField(driver, "i15 i16", self.encoder_name.text())
 
             self.selectSingleItemFirstOption(driver)
-            self.setGFormDropDown(driver, "i28 i31", region)
-            if self.auto_next.GetValue():
+            self.setGFormDropDown(driver, "i35 i38", region)
+            if self.auto_next.isChecked():
                 self.clickGFormButton(driver, "Next")
 
     def on_fill_crims_mov(self, driver):
-        self.setGFormTextField(driver, "i2 i3", self.encoder_name.GetValue())
+        self.setGFormTextField(driver, "i2 i3", self.encoder_name.text())
 
-        c_full_name = f'{self.client_firstname.GetValue()} {self.client_middlename.GetValue()} {self.client_lastname.GetValue()}'
+        c_full_name = f'{self.client_firstname.text()} {self.client_middlename.text()} {self.client_lastname.text()}'
         self.setGFormTextField(driver, "i7 i8", c_full_name)
 
-        if self.has_beneficiary.GetValue():
-            b_full_name = f'{self.bene_firstname.GetValue()} {self.bene_middlename.GetValue()} {self.bene_lastname.GetValue()}'
+        if self.has_beneficiary.isChecked():
+            b_full_name = f'{self.bene_firstname.text()} {self.bene_middlename.text()} {self.bene_lastname.text()}'
             self.setGFormTextField(driver, "i12 i13", b_full_name)
         else:
             self.setGFormTextField(driver, "i12 i13", c_full_name)
 
-        self.setGFormTextField(driver, "i34 i35", self.amount.GetValue())
+        self.setGFormTextField(driver, "i34 i35", self.amount.text())
 
-        sw_full_name = f'{self.sw_fname.GetValue()} {self.sw_mname.GetValue()} {self.sw_lname.GetValue()}'
+        sw_full_name = f'{self.sw_fname.text()} {self.sw_mname.text()} {self.sw_lname.text()}'
         self.setGFormTextField(driver, "i39 i40", sw_full_name)
 
         self.setGFormAssistance(driver)
 
-        if self.auto_submit.GetValue():
+        if self.auto_submit.isChecked():
             self.clickSubmitButton(driver, "Submit")
 
     def getGFormTitle(self, driver):
@@ -2266,13 +1830,13 @@ class MyFrame(wx.Frame):
             heading = driver.find_element(By.XPATH, "//div[@role='heading']//div[contains(@class, 'aG9Vid')]")
             # Get the text
             content = heading.text.strip()
-            self.command_log.AppendText(f"Title: {content}. \n")
+            self.command_log.append(f"Title: {content}. ")
             return content.lower()
         except NoSuchElementException:
-            self.command_log.AppendText(f"Error: Element not found. \n")
+            self.command_log.append(f"Error: Element not found. ")
             return ""
         except Exception as e:
-            self.command_log.AppendText(f"Error in Element {e} \n")
+            self.command_log.append(f"Error in Element {e} ")
             return ""
 
     def setGFormTextField(self, driver, pk_id, value):
@@ -2282,24 +1846,27 @@ class MyFrame(wx.Frame):
             if text_field and text_field.get_attribute("value") == "":
                 text_field.send_keys(value)
             else:
-                self.command_log.AppendText("Text field is already filled. \n")
+                self.command_log.append("Text field is already filled. ")
         except NoSuchElementException:
-            self.command_log.AppendText(f"Error: Element not found. \n")
+            self.command_log.append(f"Error: Element not found. ")
         except Exception as e:
-            self.command_log.AppendText(f"Unexpected error: {e} \n")
+            self.command_log.append(f"Unexpected error: {e} ")
 
     def setGFormDate(self, driver, pk_id, value):
+        """value is a QDate object."""
         try:
+            date_str = value.toString("yyyy-MM-dd")  # native <input type="date"> value format
             date_field = driver.find_element(By.XPATH, f'//input[@aria-labelledby="{pk_id}"]')
-
-            if date_field:
-                date_str = value.Format("%m-%d-%Y")
-            date_field.clear()
-            date_field.send_keys(date_str)
+            driver.execute_script(
+                "arguments[0].value = arguments[1];"
+                "arguments[0].dispatchEvent(new Event('input', { bubbles: true }));"
+                "arguments[0].dispatchEvent(new Event('change', { bubbles: true }));",
+                date_field, date_str
+            )
         except NoSuchElementException:
-            self.command_log.AppendText(f"Error: Element not found. \n")
+            self.command_log.append("Error: Element not found.")
         except Exception as e:
-            self.command_log.AppendText(f"Unexpected error: {e} \n")
+            self.command_log.append(f"Unexpected error: {e}")
 
     def setGFormRadioButton(self, driver, name, value):
         try:
@@ -2319,17 +1886,16 @@ class MyFrame(wx.Frame):
                     if group.accessible_name.__contains__(name):
                         for option in radio_options:
                             option_text = option.get_attribute("aria-label")  # Get the option text
-                            # if option_text.lower() and option_text.strip().lower() == value.lower(): # Match text exactly
                             if is_similar(option_text.lower() and option_text.strip().lower(), value.lower()):
                                 option.click()
                                 time.sleep(0.5)
-                                self.command_log.AppendText(f"Selected: {option_text}\n")
+                                self.command_log.append(f"Selected: {option_text}")
                                 break  # Stop once we find and click the right option
                 continue
         except NoSuchElementException:
-            self.command_log.AppendText(f"Error: Element entered not found.\n")
+            self.command_log.append(f"Error: Element entered not found.")
         except Exception as e:
-            self.command_log.AppendText(f"Unexpected error: {e} \n")
+            self.command_log.append(f"Unexpected error: {e} ")
 
     def setGFormRadioButtonOthers(self, driver, name, value):
         try:
@@ -2357,16 +1923,16 @@ class MyFrame(wx.Frame):
                                 text_field.send_keys(value)  # Input custom text
                                 time.sleep(0.5)
 
-                                self.command_log.AppendText(f"Selected: {option_text}, Entered: {value}\n")
+                                self.command_log.append(f"Selected: {option_text}, Entered: {value}")
                                 break  # Stop after finding the first "Other" option
                             except NoSuchElementException:
-                                self.command_log.AppendText("Error: No text field found for 'Other' option.\n")
+                                self.command_log.append("Error: No text field found for 'Other' option.")
                                 break  # Stop after finding and selecting "Other:"
                     continue  # Move to the next radio group if needed
         except NoSuchElementException:
-            self.command_log.AppendText(f"Error: Element entered not found.\n")
+            self.command_log.append(f"Error: Element entered not found.")
         except Exception as e:
-            self.command_log.AppendText(f"Unexpected error: {e} \n")
+            self.command_log.append(f"Unexpected error: {e} ")
 
     def selectSingleItemFirstOption(self, driver):
         radio_groups = driver.find_elements(By.XPATH, "//div[@role='radiogroup']")
@@ -2384,8 +1950,21 @@ class MyFrame(wx.Frame):
             if not selected_option:
                 if len(radio_options) == 1:
                     radio_options[0].click()
-                    self.command_log.AppendText("Field :" + group.accessible_name + " = " + radio_options[0].accessible_name + "\n")
+                    self.command_log.append("Field :" + group.accessible_name + " = " + radio_options[0].accessible_name)
                     time.sleep(0.5)  # Small delay to avoid issues
+
+    def setGFormRecordEmailCheckbox(self, driver):
+        try:
+            checkboxes = driver.find_elements(By.XPATH, "//div[@role='checkbox']")
+            for checkbox in checkboxes:
+                if checkbox.get_attribute("aria-checked") != "true":
+                    checkbox.click()
+                    self.command_log.append("Checked: " + checkbox.accessible_name)
+                    time.sleep(0.5)  # Small delay to avoid issues
+        except NoSuchElementException:
+            self.command_log.append("Error: Element not found.")
+        except Exception as e:
+            self.command_log.append(f"Unexpected error: {e}")
 
     def selectAllItemFirstOption(self, driver):
         try:
@@ -2403,16 +1982,15 @@ class MyFrame(wx.Frame):
 
                 if not selected_option:
                     radio_options[0].click()
-                    self.command_log.AppendText("Field :" + group.accessible_name + " = " + radio_options[0].accessible_name + " \n")
+                    self.command_log.append("Field :" + group.accessible_name + " = " + radio_options[0].accessible_name + " ")
                     time.sleep(0.5)  # Small delay to avoid issues
                     return None
                 return None
             return None
         except NoSuchElementException:
-            self.command_log.AppendText(f"Error: Dropdown element not found. \n")
+            self.command_log.append(f"Error: Dropdown element not found. ")
             return False
         except Exception as e:
-            # self.command_log.AppendText(f"Unexpected error: {e} \n")
             return False
 
     def setGFormDropDown(self, driver, pk_id, value):
@@ -2420,7 +1998,6 @@ class MyFrame(wx.Frame):
 
             # Locate the dropdown field (adjust XPath based on your form structure)
             dropdown = driver.find_element(By.XPATH, f"//div[@role='listbox' and @aria-labelledby='{pk_id}']")
-            # f"//span[@role='combobox' and @aria-labelledby='{name}']"
             if dropdown:
                 # Click to open the dropdown
                 dropdown.click()
@@ -2431,7 +2008,6 @@ class MyFrame(wx.Frame):
                 selected_option = None
                 for option in options:
                     name_text = option.get_attribute("data-value").strip().lower()
-                    # # if all(part in name_text for part in user_input_interviewer.split()):
                     if is_similar(name_text, value):
                         selected_option = option
                         break
@@ -2440,17 +2016,16 @@ class MyFrame(wx.Frame):
                 if selected_option:
                     selected_option.click()
                     time.sleep(0.5)
-                    self.command_log.AppendText(f"Selected: {selected_option.get_attribute('data-value')}")
+                    self.command_log.append(f"Selected: {selected_option.get_attribute('data-value')}")
                     return None
                 return None
             else:
-                self.command_log.AppendText("No matching name found! \n")
+                self.command_log.append("No matching name found! ")
                 return True
         except NoSuchElementException:
-            self.command_log.AppendText(f"Error: Dropdown element not found. \n")
+            self.command_log.append(f"Error: Dropdown element not found. ")
             return False
         except Exception as e:
-            # self.command_log.AppendText(f"Unexpected error: {e} \n")
             return False
 
     def setGFormAssistance(self, driver):
@@ -2469,7 +2044,7 @@ class MyFrame(wx.Frame):
             if (not selected_option):
                 if group.accessible_name.__contains__("TYPES OF ASSISSTANCE"):
                     # "Medical", "Burial", "Transportation", "Cash Support", "Food Subsidy"
-                    match self.financial_assist.GetStringSelection().lower():
+                    match self.financial_assist.currentText().lower():
                         case "medical":
                             radio_options[3].click()
                         case "transportation":
@@ -2480,7 +2055,7 @@ class MyFrame(wx.Frame):
                             radio_options[0].click()
                         case _:
                             radio_options[3].click()
-                            self.command_log.AppendText("Field :" + group.accessible_name + " = " + radio_options[1].accessible_name + " \n")
+                            self.command_log.append("Field :" + group.accessible_name + " = " + radio_options[1].accessible_name + " ")
                     continue
 
     def clickGFormButton(self, driver, value):
@@ -2489,27 +2064,24 @@ class MyFrame(wx.Frame):
 
             if button is not None:
                 button.click()
-                self.command_log.AppendText(f"Button click: {value} \n")
+                self.command_log.append(f"Button click: {value} ")
             return True
         except NoSuchElementException:
-            self.command_log.AppendText(f"Error: Element not found. \n")
+            self.command_log.append(f"Error: Element not found. ")
             return False
         except Exception as e:
-            self.command_log.AppendText(f"Error in Element {e} \n")
+            self.command_log.append(f"Error in Element {e} ")
             return False
 
     def setDate(self, driver, name, value):
+        """value is a QDate object."""
         try:
-            # Convert to string format YYYY-MM-DD
-            date_str = value.Format("%m-%d-%Y")
-            # Locate the date input field by ID
-            date_field = driver.find_element(By.ID, name)  # Replace with actual ID
-
-            # Set the date (YYYY-MM-DD format)
+            date_str = value.toString("MM-dd-yyyy")
+            date_field = driver.find_element(By.ID, name)
             date_field.send_keys(date_str)
-            self.command_log.AppendText(f"Date {name}: {value} \n")
+            self.command_log.append(f"Date {name}: {date_str}")
         except Exception as e:
-            self.command_log.AppendText(f"Error in Date {e} \n")
+            self.command_log.append(f"Error in Date {e}")
 
     def checkIfExisting(self, driver, name):
         try:
@@ -2523,9 +2095,9 @@ class MyFrame(wx.Frame):
             else:
                 return False
         except NoSuchElementException:
-            self.command_log.AppendText(f"Error: Element with {name} not found. \n")
+            self.command_log.append(f"Error: Element with {name} not found. ")
         except Exception as e:
-            self.command_log.AppendText(f"Element not existing {e} \n")
+            self.command_log.append(f"Element not existing {e} ")
             return False
 
     def selectCheckBox(self, driver, name):
@@ -2535,9 +2107,9 @@ class MyFrame(wx.Frame):
             if div_element is not None:
                 div_element.click()
         except NoSuchElementException:
-            self.command_log.AppendText(f"Error: Element with {name} not found. \n")
+            self.command_log.append(f"Error: Element with {name} not found. ")
         except Exception as e:
-            self.command_log.AppendText(f"Element not existing {e} \n")
+            self.command_log.append(f"Element not existing {e} ")
 
     def selectDefaultCheckBox(self, driver, name):
         try:
@@ -2551,9 +2123,9 @@ class MyFrame(wx.Frame):
                     return True
             return True
         except NoSuchElementException:
-            self.command_log.AppendText(f"Error: Element with {name} not found. \n")
+            self.command_log.append(f"Error: Element with {name} not found. ")
         except Exception as e:
-            self.command_log.AppendText(f"Element not existing {e} \n")
+            self.command_log.append(f"Element not existing {e} ")
             return False
 
     def clickButton(self, driver, name):
@@ -2563,9 +2135,9 @@ class MyFrame(wx.Frame):
             if div_element is not None:
                 div_element.click()
         except NoSuchElementException:
-            self.command_log.AppendText(f"Error: Element with {name} not found. \n")
+            self.command_log.append(f"Error: Element with {name} not found. ")
         except Exception as e:
-            self.command_log.AppendText(f"Element not existing {e} \n")
+            self.command_log.append(f"Element not existing {e} ")
 
     def setDropDown(self, driver, name, value):
         try:
@@ -2575,7 +2147,7 @@ class MyFrame(wx.Frame):
             title_value = element.get_attribute("title")
 
             if title_value:
-                self.command_log.AppendText(f"Field {name}: already selected \n")
+                self.command_log.append(f"Field {name}: already selected ")
             else:
                 combobox = driver.find_element(By.XPATH,
                                        f"//span[@role='combobox' and @aria-labelledby='{name}']")
@@ -2588,11 +2160,10 @@ class MyFrame(wx.Frame):
                                              f"//li[contains(@class, 'select2-results__option') and contains(normalize-space(), '{value}')]")  # Adjust text as needed
                 option.click()
                 time.sleep(0.5)
-                self.command_log.AppendText(f"Field {name}: {value} \n")
+                self.command_log.append(f"Field {name}: {value} ")
         except NoSuchElementException:
-            self.command_log.AppendText(f"Error: Element with {name} not found. \n")
+            self.command_log.append(f"Error: Element with {name} not found. ")
         except Exception as e:
-            # self.command_log.AppendText(f"Error in Element {e} \n")
             return
 
     def setTextField(self, driver, name, value):
@@ -2604,15 +2175,15 @@ class MyFrame(wx.Frame):
             # Check if the field already contains the desired value
             current_text = input_field.get_attribute("value").strip()
             if current_text == value:
-                self.command_log.AppendText(f"Field {name} already contains the desired value. Skipping...\n")
+                self.command_log.append(f"Field {name} already contains the desired value. Skipping...")
                 return
 
             input_field.send_keys(value)
-            self.command_log.AppendText(f"Field {name}: {value} \n")
+            self.command_log.append(f"Field {name}: {value} ")
         except NoSuchElementException:
-            self.command_log.AppendText(f"Error: Element with {name} not found. \n")
+            self.command_log.append(f"Error: Element with {name} not found. ")
         except Exception as e:
-            self.command_log.AppendText(f"Error in Element {e} \n")
+            self.command_log.append(f"Error in Element {e} ")
 
     def setTextAreaField(self, driver, name, value):
         try:
@@ -2620,19 +2191,17 @@ class MyFrame(wx.Frame):
             # Find the input field by ID and fill it
             username_field = driver.find_element(By.NAME, name)
             username_field.send_keys(value)
-            self.command_log.AppendText(f"Field {name}: {value} \n")
+            self.command_log.append(f"Field {name}: {value} ")
         except NoSuchElementException:
-            self.command_log.AppendText(f"Error: Element with {name} not found. \n")
+            self.command_log.append(f"Error: Element with {name} not found. ")
         except Exception as e:
-            self.command_log.AppendText(f"Error in Element {e} \n")
+            self.command_log.append(f"Error in Element {e} ")
 
     def getTitle(self, driver):
         try:
             visible_fieldset = driver.find_element(By.XPATH, "//fieldset[contains(@style, 'display: block;')]")
 
             element = visible_fieldset.find_element(By.XPATH, ".//h6[contains(@class, 'form-wizard-title')]")
-            # clients_info_text = element.text.strip().replace(element.find_element(By.TAG_NAME, "span").text, "").strip().lower()
-            #
             # Get full text and remove the <span> and <small> parts
             full_text = element.text.strip()
 
@@ -2644,12 +2213,12 @@ class MyFrame(wx.Frame):
             small_tags = element.find_elements(By.TAG_NAME, "small")
             if small_tags:
                 full_text = full_text.replace(small_tags[0].text.strip(), "").strip()
-            self.command_log.AppendText(f"Extracted Text: {full_text.lower()} \n")
+            self.command_log.append(f"Extracted Text: {full_text.lower()} ")
             return full_text.lower()
         except NoSuchElementException:
-            self.command_log.AppendText(f"Error: Element not found. \n")
+            self.command_log.append(f"Error: Element not found. ")
         except Exception as e:
-            self.command_log.AppendText(f"Error in Element {e} \n")
+            self.command_log.append(f"Error in Element {e} ")
 
     def hasASearchField(self, driver, value):
         try:
@@ -2659,40 +2228,40 @@ class MyFrame(wx.Frame):
 
             # Type the search query
             search_input.send_keys(value)
-            self.command_log.AppendText(f"Search Text: {value} \n")
+            self.command_log.append(f"Search Text: {value} ")
             time.sleep(1)
             return True
         except NoSuchElementException:
-            self.command_log.AppendText(f"Error: Element not found. \n")
+            self.command_log.append(f"Error: Element not found. ")
             return False
         except Exception as e:
-            self.command_log.AppendText(f"Error in Element {e} \n")
+            self.command_log.append(f"Error in Element {e} ")
             return False
 
     def clickHrefButton(self, driver, value):
         try:
             add_client_button = driver.find_element(By.XPATH, f"//a[contains(text(), '{value}')]")
 
-            self.command_log.AppendText(f"Button click: {value} \n")
+            self.command_log.append(f"Button click: {value} ")
             return True
         except NoSuchElementException:
-            self.command_log.AppendText(f"Error: Element not found. \n")
+            self.command_log.append(f"Error: Element not found. ")
             return False
         except Exception as e:
-            self.command_log.AppendText(f"Error in Element {e} \n")
+            self.command_log.append(f"Error in Element {e} ")
             return False
 
     def clickAddButton(self, driver, value):
         try:
             add_client_button = driver.find_element(By.XPATH, f"//a[contains(text(), '{value}')]")
             add_client_button.click()
-            self.command_log.AppendText(f"Button click: {value} \n")
+            self.command_log.append(f"Button click: {value} ")
             return True
         except NoSuchElementException:
-            self.command_log.AppendText(f"Error: Element not found. \n")
+            self.command_log.append(f"Error: Element not found. ")
             return False
         except Exception as e:
-            self.command_log.AppendText(f"Error in Element {e} \n")
+            self.command_log.append(f"Error in Element {e} ")
             return False
 
     def clickIconButton(self, driver):
@@ -2703,10 +2272,10 @@ class MyFrame(wx.Frame):
             icon.click()
             return True
         except NoSuchElementException:
-            self.command_log.AppendText(f"Error: Element not found. \n")
+            self.command_log.append(f"Error: Element not found. ")
             return False
         except Exception as e:
-            self.command_log.AppendText(f"Error in Element {e} \n")
+            self.command_log.append(f"Error in Element {e} ")
             return False
 
     def searchResult(self, driver):
@@ -2714,10 +2283,10 @@ class MyFrame(wx.Frame):
             icon = driver.find_element(By.CLASS_NAME, "no-results")
             return True
         except NoSuchElementException:
-            self.command_log.AppendText(f"Error: Element not found. \n")
+            self.command_log.append(f"Error: Element not found. ")
             return False
         except Exception as e:
-            self.command_log.AppendText(f"Error in Element {e} \n")
+            self.command_log.append(f"Error in Element {e} ")
             return False
 
     def clickNextButton(self, driver, value):
@@ -2725,29 +2294,28 @@ class MyFrame(wx.Frame):
             next_button = driver.find_element(By.XPATH, f"//button[normalize-space(text())='{value}']")
             if next_button is not None:
                 next_button.click()
-            self.command_log.AppendText(f"Button click: {value} \n")
+            self.command_log.append(f"Button click: {value} ")
             return True
         except NoSuchElementException:
-            self.command_log.AppendText(f"Error: Element not found. \n")
+            self.command_log.append(f"Error: Element not found. ")
             return False
         except Exception as e:
-            self.command_log.AppendText(f"Error in Element {e} \n")
+            self.command_log.append(f"Error in Element {e} ")
             return False
 
     def clickSubmitButton(self, driver, value):
         try:
             # Find the element by XPath (using aria-label or text)
-            # //div[@role='heading']//div[contains(@class, 'aG9Vid')]
             element = driver.find_element(By.XPATH, f"//div[@role='button' and @aria-label='{value}']")
             if element is not None:
                 element.click()
-            self.command_log.AppendText(f"Button click: {value} \n")
+            self.command_log.append(f"Button click: {value} ")
             return True
         except NoSuchElementException:
-            self.command_log.AppendText(f"Error: Element not found. \n")
+            self.command_log.append(f"Error: Element not found. ")
             return False
         except Exception as e:
-            self.command_log.AppendText(f"Error in Element {e} \n")
+            self.command_log.append(f"Error in Element {e} ")
             return False
 
     def is_end_of_website(self, driver):
@@ -2757,10 +2325,10 @@ class MyFrame(wx.Frame):
                 return True
             return False
         except NoSuchElementException:
-            self.command_log.AppendText(f"Error: Element not found. \n")
+            self.command_log.append(f"Error: Element not found. ")
             return False
         except Exception as e:
-            self.command_log.AppendText(f"Error in Element {e} \n")
+            self.command_log.append(f"Error in Element {e} ")
             return False
 
     def is_end_of_g_form(self, driver):
@@ -2770,247 +2338,158 @@ class MyFrame(wx.Frame):
                 return True
             return False
         except NoSuchElementException:
-            self.command_log.AppendText(f"Error: Element not found. \n")
+            self.command_log.append(f"Error: Element not found. ")
             return False
         except Exception as e:
-            self.command_log.AppendText(f"Error in Element {e} \n")
+            self.command_log.append(f"Error in Element {e} ")
             return False
 
     def proceed_to_new(self, driver):
         self.clickHrefButton(driver, "Home")
 
-    def same_address_event(self, event):
-        checkbox = event.GetEventObject()
-        is_checked = checkbox.GetValue()
-        if is_checked:
-            self.bene_house_street.SetValue(self.client_house_street.GetValue())
-            self.bene_barangay.SetValue(self.client_barangay.GetValue())
-            self.bene_city.SetSelection(self.client_city.GetSelection())
-        else :
-            self.bene_house_street.SetValue("")
-            self.bene_barangay.SetValue("")
-            self.bene_city.SetSelection(-1)
-
-    def same_contact_event(self, event):
-        checkbox = event.GetEventObject()
-        is_checked = checkbox.GetValue()
-        if is_checked:
-            self.bene_contact_no.SetValue(self.client_contact_no.GetValue())
-
-    def has_beneficiary_event(self, event):
-        checkbox = event.GetEventObject()
-        is_checked = checkbox.GetValue()
-        if not is_checked:
-            self.bene_lastname.SetValue("")
-            self.bene_firstname.SetValue("")
-            self.bene_middlename.SetValue("")
-
-            self.bene_age.SetValue("")
-            self.bene_ext.SetValue("")
-            self.bene_relationship.SetSelection(-1)
-            self.bene_gender.SetSelection(-1)
-            self.bene_civil_status.SetSelection(-1)
-
-            self.bene_contact_no.SetValue("")
-
-            self.bene_house_street.SetValue("")
-            self.bene_barangay.SetValue("")
-            self.bene_city.SetSelection(-1)
+    def same_address_event(self, state=None):
+        if self.same_address.isChecked():
+            self.bene_house_street.setText(self.client_house_street.text())
+            self.bene_barangay.setText(self.client_barangay.text())
+            self.bene_city.setCurrentIndex(self.client_city.currentIndex())
         else:
-            self.bene_relationship.SetSelection(self.client_relationship.GetSelection())
+            self.bene_house_street.setText("")
+            self.bene_barangay.setText("")
+            self.bene_city.setCurrentIndex(-1)
 
+    def same_contact_event(self, state=None):
+        if self.same_contact.isChecked():
+            self.bene_contact_no.setText(self.client_contact_no.text())
 
-    def on_checkbox_change(self, event):
-        checkbox = event.GetEventObject()
-        is_checked = checkbox.GetValue()
+    def has_beneficiary_event(self, state=None):
+        if not self.has_beneficiary.isChecked():
+            for w in [self.bene_lastname, self.bene_firstname, self.bene_middlename,
+                      self.bene_age, self.bene_ext, self.bene_contact_no,
+                      self.bene_house_street, self.bene_barangay]:
+                w.setText("")
+            self.bene_relationship.setCurrentIndex(-1)
+            self.bene_gender.setCurrentIndex(-1)
+            self.bene_civil_status.setCurrentIndex(-1)
+            self.bene_city.setCurrentIndex(-1)
+        else:
+            self.bene_relationship.setCurrentIndex(self.client_relationship.currentIndex())
+
+    def on_checkbox_change(self, state=None):
         self.load_data_person()
 
-    def on_selection(self, event):
-        name = self.client_civil_status.GetStringSelection()
-        caption = self.civil_status_data_map[name]
-        print(f"Selected Caption: {caption} Name : {name}\n ")
+    def on_selection(self, index=None):
+        name = self.client_civil_status.currentText()
+        caption = self.civil_status_data_map.get(name, "")
+        print(f"Selected Caption: {caption} Name: {name}")
 
-    def on_selection_worker(self, event):
-        selected = self.social_worker.GetStringSelection()
+    def on_selection_worker(self, index=None):
+        selected = self.social_worker.currentText()
+        if not selected:
+            return
         name_parts = selected.split(",")
-
-        fname = name_parts[0]
-        mname = name_parts[1]
-        lname = name_parts[2]
-
+        if len(name_parts) < 3:
+            return
+        fname, mname, lname = name_parts[0], name_parts[1], name_parts[2]
         data_worker = get_worker_id(lname.strip(), fname.strip(), mname.strip())
         if data_worker:
-            # data = self.get_worker_by_id(data_id[0])
-
-            self.sw_lname.SetValue(data_worker[1])
-            self.sw_fname.SetValue(data_worker[2])
-            self.sw_mname.SetValue(data_worker[3])
-            self.thru_firstname.SetValue(data_worker[4])
-
-            print(f"Selected Caption: {selected} : {data_worker} ")
+            self.sw_lname.setText(data_worker[1])
+            self.sw_fname.setText(data_worker[2])
+            self.sw_mname.setText(data_worker[3])
+            self.thru_firstname.setChecked(bool(data_worker[4]))
 
     def reload_choice_items(self):
-        """Reload the Choice items from the database."""
         self.social_worker_list = get_all_workers()
-
-        # Clear old items
-        self.social_worker.Clear()
-
-        # Create and insert new display names
+        self.social_worker.clear()
         self.social_worker_choices = [f"{fname}, {mname}, {lname}" for (_id, lname, fname, mname, _thru) in self.social_worker_list]
+        self.social_worker.addItems(self.social_worker_choices)
 
-        for name in self.social_worker_choices:
-            self.social_worker.Append(name)
-
-    def on_sw_text_change(self, event):
-        """Handle text typing in ComboBox to auto-select matching item."""
-        typed_text = self.social_worker_filter.GetValue().lower().strip()
-
+    def on_sw_text_change(self, text):
+        typed = text.lower().strip()
         for index, name in enumerate(self.social_worker_choices):
-            if name.lower().startswith(typed_text):
-                self.social_worker.SetSelection(index)
-                self.on_selection_worker(event)
-                # self.social_worker.SetValue(name)
-                # Move cursor to end so user can continue typing
-                # self.social_worker.SetInsertionPointEnd()
+            if name.lower().startswith(typed):
+                self.social_worker.setCurrentIndex(index)
+                self.on_selection_worker(index)
                 break
 
-    def on_export(self, event):
-        """
-        Handles the export button click.
-        Shows a loading indicator while exporting.
-        """
-        self.busy_info = wx.BusyInfo("Exporting, please wait...", parent=self)
-        wx.Yield()  # Allow the busy info to display immediately
+    def on_export(self, event=None):
+        self.command_log.append("Exporting, please wait...")
+        QApplication.processEvents()
 
         def export_task():
             try:
-                export_sqlite_to_csv(
-                    db_path=DB_NAME,
-                    table_name="person",
-                    csv_path="person-backup-db.csv"
-                )
-                wx.CallAfter(wx.MessageBox, "Export completed successfully!", "Success", wx.OK | wx.ICON_INFORMATION)
+                export_sqlite_to_csv(DB_NAME, "person", "person-backup-db.csv")
+                self._sig_msg_box.emit("Success", "Export completed successfully!", "info")
             except Exception as e:
-                wx.CallAfter(wx.MessageBox, f"Error: {e}", "Error", wx.OK | wx.ICON_ERROR)
+                self._sig_msg_box.emit("Error", str(e), "error")
             finally:
-                wx.CallAfter(self.clear_busy_info)
+                self._sig_log.emit("Export done.")
 
-        # Run export in a separate thread
-        threading.Thread(target=export_task).start()
-
-    def clear_busy_info(self):
-        """Safely clear the busy indicator."""
-        if self.busy_info:
-            self.busy_info = None  # When BusyInfo object is deleted, it closes the message automatically
+        threading.Thread(target=export_task, daemon=True).start()
 
 
-# === wxPython UI ===
-class ActivationFrame(wx.Frame):
-    def __init__(self, parent, app, title="Activate App"):
-        super().__init__(parent, title=title, size=(480, 230))
-        self.app = app  # <-- store reference to MainApp
+class ActivationFrame(QDialog):
+    def __init__(self, on_activate_success):
+        super().__init__()
+        self.on_activate_success = on_activate_success
+        self.setWindowTitle("Activate App")
+        self.setFixedSize(480, 230)
 
-        panel = wx.Panel(self)
-        vbox = wx.BoxSizer(wx.VERTICAL)
+        layout = QVBoxLayout(self)
 
-        # Info Text
-        info_device = wx.StaticText(panel, label="Device Id:")
-        vbox.Add(info_device, flag=wx.ALL, border=10)
-
+        layout.addWidget(QLabel("Device Id:"))
         self.label_text = get_device_id()
-        label = wx.StaticText(panel, label=self.label_text)
-        font = label.GetFont()
-        font.MakeBold()
-        label.SetFont(font)
+        device_label = QLabel(self.label_text)
+        font = device_label.font()
+        font.setBold(True)
+        device_label.setFont(font)
+        device_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        device_label.mousePressEvent = self._copy_to_clipboard
+        layout.addWidget(device_label)
 
-        # Change cursor to indicate clickable
-        label.SetCursor(wx.Cursor(wx.CURSOR_HAND))
+        layout.addWidget(QLabel("License key:"))
+        self.key_input = QLineEdit()
+        layout.addWidget(self.key_input)
 
-        # Bind mouse click event
-        label.Bind(wx.EVT_LEFT_DOWN, self.copy_to_clipboard)
-        vbox.Add(label, flag=wx.ALL, border=10)
+        activate_btn = QPushButton("Activate")
+        activate_btn.clicked.connect(self._on_activate)
+        layout.addWidget(activate_btn, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        # Info Text
-        info_text = wx.StaticText(panel, label="License key:")
-        vbox.Add(info_text, flag=wx.ALL, border=10)
+        self.status_label = QLabel("")
+        layout.addWidget(self.status_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        # Key input field
-        self.key_input = wx.TextCtrl(panel)
-        vbox.Add(self.key_input, flag=wx.EXPAND | wx.LEFT | wx.RIGHT, border=10)
+    def _copy_to_clipboard(self, event):
+        QApplication.clipboard().setText(self.label_text)
+        QMessageBox.information(self, "Success", "Copied to clipboard!")
 
-        # Activate button
-        activate_btn = wx.Button(panel, label="Activate")
-        activate_btn.Bind(wx.EVT_BUTTON, self.on_activate)
-        vbox.Add(activate_btn, flag=wx.ALL | wx.CENTER, border=15)
-
-        # Status label
-        self.status_label = wx.StaticText(panel, label="")
-        vbox.Add(self.status_label, flag=wx.ALL | wx.CENTER, border=10)
-
-        panel.SetSizer(vbox)
-
-        self.Centre()
-        self.Show()
-
-    def copy_to_clipboard(self, event):
-        """Copies label text to the system clipboard."""
-        if wx.TheClipboard.Open():
-            wx.TheClipboard.SetData(wx.TextDataObject(self.label_text))
-            wx.TheClipboard.Close()
-            wx.MessageBox("Copied to clipboard!", "Success", wx.OK | wx.ICON_INFORMATION)
-        else:
-            wx.MessageBox("Unable to access clipboard.", "Error", wx.OK | wx.ICON_ERROR)
-
-    def on_activate(self, event):
-        """
-        Handles activation button click.
-        """
-        user_key = self.key_input.GetValue().strip()
+    def _on_activate(self):
+        user_key = self.key_input.text().strip()
         if not user_key:
-            wx.MessageBox("Please enter a key.", "Error", wx.OK | wx.ICON_ERROR)
+            QMessageBox.critical(self, "Error", "Please enter a key.")
             return
-
         if activate_trial(user_key):
-            wx.MessageBox("Activation successful!", "Success", wx.OK | wx.ICON_INFORMATION)
-            self.status_label.SetLabel("Activated ✔️")
-            self.key_input.Disable()
-
-            # --- OPEN MAIN APP ---
-            self.Destroy()  # Close Activation Window
-            self.app.open_main_app()
+            QMessageBox.information(self, "Success", "Activation successful!")
+            self.status_label.setText("Activated ✔️")
+            self.key_input.setEnabled(False)
+            self.accept()
+            self.on_activate_success()
         else:
-            wx.MessageBox("Invalid key.", "Error", wx.OK | wx.ICON_ERROR)
-            self.status_label.SetLabel("Activation failed ❌")
+            QMessageBox.critical(self, "Error", "Invalid key.")
+            self.status_label.setText("Activation failed ❌")
 
-class MainApp(wx.App):
-    def OnInit(self):
-        if is_trial_valid():
-            self.open_main_app()
-        else:
-            self.frame = ActivationFrame(None, self)
-        return True
-
-    def open_main_app(self):
-        """Opens the main application window."""
-        init_db()
-        self.main_frame = MyFrame()
-        self.main_frame.Show()
-
-class MainAppFrame(wx.Frame):
-    """Main Application Window (after activation)."""
-    def __init__(self, parent):
-        # You can continue to the main app here (e.g., open main window)
-        init_db()
-        app = wx.App(False)
-        frame = MyFrame()
-        frame.Show()
 
 if __name__ == "__main__":
-    app = MainApp(False)
-    app.MainLoop()
-    # init_db()
-    # app = wx.App(False)
-    # frame = MyFrame()
-    # frame.Show()
-    # app.MainLoop()
+    app = QApplication(sys.argv)
+    init_db()
+
+    if is_trial_valid():
+        window = MyFrame()
+        window.show()
+    else:
+        def open_main():
+            window = MyFrame()
+            window.show()
+
+        dlg = ActivationFrame(open_main)
+        dlg.exec()
+
+    sys.exit(app.exec())

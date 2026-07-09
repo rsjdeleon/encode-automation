@@ -130,7 +130,7 @@ district_city = {
 }
 
 approved_by_list = {
-    "Anthony Lisondra Alcantara": "ANTHONY LISONDRA ALCANTARA",
+    "Anthony L. Alcantara": "ANTHONY LISONDRA ALCANTARA",
     "Maricel M. Barnedo": "MARICEL M BARNEDO",
     "Miriam C. Navarro": "MIRIAM C. NAVARRO",
     "Michael J. Lorico": "MICHAEL JOSEPH J LORICO",
