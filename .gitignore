@@ -17,6 +17,7 @@ Lib/site-packages/
 # PyInstaller build files
 build/
 dist/
+dist-release/
 *.spec
 
 # Logs and debug

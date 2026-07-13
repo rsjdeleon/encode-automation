@@ -4,9 +4,9 @@ import threading
 import os
 import pickle
 import csv
-import string
 import random
 import sqlite3
+import traceback
 
 from selenium.webdriver.common.alert import Alert
 from datetime import datetime
@@ -23,7 +23,9 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QDate, Signal, QObject, QTimer
 from PySide6.QtGui import QColor, QFont, QCursor
 
-from widgets import AllCapsLineEdit, NoScrollComboBox
+from widgets import AllCapsLineEdit, NoScrollComboBox, set_table_visible_rows, set_textedit_visible_rows
+
+from styles import STYLESHEET
 
 from utilities import is_similar
 from utilities import get_date_value
@@ -36,24 +38,29 @@ from db_new_person import set_encoded
 from db_new_person import insert_person, update_person, delete_person_by_id
 
 from db_worker import init_db_worker
-from db_worker import get_all_workers, get_worker_id
-from db_worker import insert_worker, update_worker, delete_worker_by_id
+from db_worker import get_all_workers, get_worker_by_full_name
+
+from db_config import init_db_config, seed_from_config_if_empty, backfill_city_regions
+from db_config import migrate_gender_to_pairs, migrate_target_sector_to_pairs
+from db_config import migrate_mode_of_release_to_pairs, migrate_financial_assistance_to_pairs
+from db_config import migrate_civil_status_to_pairs, migrate_fund_source_to_pairs
+from db_config import migrate_relationship_to_pairs, migrate_client_sub_category_to_pairs
+from db_config import migrate_target_sector_to_dual_pairs, migrate_approved_by_to_dual_pairs
+from db_config import migrate_gender_to_dual_pairs
+from db_config import migrate_civil_status_to_dual_pairs, migrate_fund_source_to_dual_pairs
+from db_config import migrate_mode_of_release_to_dual_pairs, migrate_financial_assistance_to_dual_pairs
+from db_config import migrate_relationship_to_dual_pairs, migrate_client_sub_category_to_dual_pairs
+from db_config import migrate_region_to_dual_pairs, migrate_province_region_link_to_id
+from db_config import migrate_city_province_link_to_id, migrate_province_to_dual_pairs
+from db_config import migrate_city_to_dual_pairs, migrate_barangay_to_dual_pairs
+from db_config import migrate_barangay_city_link_to_id
+from db_config import remove_approver_list
+from db_config import get_all_lists, get_items
 
 from config import mov_url
 from config import offline_url
 from config import website_url
-
-from config import gender_list
-from config import civil_status_list
-from config import fund_source_list
-from config import target_sector_list
-from config import financial_assistance_list
-from config import relationship_list
 from config import list_of_city
-from config import district_city
-from config import mode_of_release
-from config import approved_by_list
-from config import client_sub_category
 
 from license import is_trial_valid, activate_trial, get_device_id
 import winsound
@@ -64,10 +71,63 @@ AllCapsTextCtrl = AllCapsLineEdit
 AllTextCtrl = QLineEdit
 
 
+def _log_crash(exc_type, exc_value, exc_tb):
+    message = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+    try:
+        with open("crash.log", "a", encoding="utf-8") as f:
+            f.write(f"\n--- {datetime.now().isoformat()} ---\n{message}")
+    except Exception:
+        pass
+    print(message, file=sys.stderr)
+
+
+def install_crash_logging():
+    """The --windowed build has no console, so an unhandled exception in the
+    main thread or the background automation thread (started via
+    threading.Thread in on_button_click) would otherwise vanish silently --
+    a button click that appears to do nothing, with no error and no log
+    line. Route both to crash.log next to the exe so the real cause is
+    visible instead of invisible."""
+    sys.excepthook = _log_crash
+
+    def _thread_excepthook(args):
+        _log_crash(args.exc_type, args.exc_value, args.exc_traceback)
+
+    threading.excepthook = _thread_excepthook
+
+
 # Initialize SQLite database
 def init_db():
     init_db_person()
     init_db_worker()
+    init_db_config()
+    seed_from_config_if_empty()
+    backfill_city_regions()
+    migrate_gender_to_pairs()
+    migrate_target_sector_to_pairs()
+    migrate_mode_of_release_to_pairs()
+    migrate_financial_assistance_to_pairs()
+    migrate_civil_status_to_pairs()
+    migrate_fund_source_to_pairs()
+    migrate_relationship_to_pairs()
+    migrate_client_sub_category_to_pairs()
+    migrate_target_sector_to_dual_pairs()
+    migrate_approved_by_to_dual_pairs()
+    migrate_gender_to_dual_pairs()
+    migrate_civil_status_to_dual_pairs()
+    migrate_fund_source_to_dual_pairs()
+    migrate_mode_of_release_to_dual_pairs()
+    migrate_financial_assistance_to_dual_pairs()
+    migrate_relationship_to_dual_pairs()
+    migrate_client_sub_category_to_dual_pairs()
+    migrate_region_to_dual_pairs()
+    migrate_province_region_link_to_id()
+    migrate_city_province_link_to_id()
+    migrate_barangay_city_link_to_id()
+    migrate_province_to_dual_pairs()
+    migrate_city_to_dual_pairs()
+    migrate_barangay_to_dual_pairs()
+    remove_approver_list()
 
 def export_sqlite_to_csv(db_path, table_name, csv_path):
     """
@@ -107,7 +167,6 @@ def export_sqlite_to_csv(db_path, table_name, csv_path):
 
 class MyFrame(QMainWindow):
     row_data = {}  # ID -> full data
-    row_data_sw = {}  # ID -> full data
 
     # Thread-safe UI signals
     _sig_log = Signal(str)
@@ -115,69 +174,6 @@ class MyFrame(QMainWindow):
     _sig_reload_person = Signal()
     _sig_select_first = Signal()
     _sig_msg_box = Signal(str, str, str)  # title, message, kind (info/error)
-
-    def load_data_worker(self):
-        selected_rows = self.list_ctrl_worker.selectedItems()
-        self.selected_worker_id = int(selected_rows[0].text()) if selected_rows else None
-        self.list_ctrl_worker.setRowCount(0)
-        for row in get_all_workers():
-            r = self.list_ctrl_worker.rowCount()
-            self.list_ctrl_worker.insertRow(r)
-            for col, val in enumerate(row):
-                self.list_ctrl_worker.setItem(r, col, QTableWidgetItem(str(val)))
-            self.row_data_sw[row[0]] = {
-                "id": row[0], "sw_lname": row[1], "sw_fname": row[2],
-                "sw_mname": row[3], "search_thru_first_name": row[4],
-            }
-
-    def on_add_worker(self, event=None):
-        reply = QMessageBox.question(self, "Add", "Are you sure you want to add?",
-                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if reply == QMessageBox.StandardButton.Yes:
-            if insert_worker(
-                self.sw_last_name.text(), self.sw_first_name.text(),
-                self.sw_middle_name.text(), self.sw_thru_first_name.isChecked()
-            ):
-                self.load_data_worker()
-                self.reload_choice_items()
-            else:
-                QMessageBox.critical(self, "Error", "Record already exist.")
-
-    def on_update_worker(self, event=None):
-        reply = QMessageBox.question(self, "Update", "Are you sure you want to update?",
-                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if reply == QMessageBox.StandardButton.Yes:
-            if self.selected_worker_id:
-                update_worker(
-                    self.selected_worker_id,
-                    self.sw_last_name.text(), self.sw_first_name.text(),
-                    self.sw_middle_name.text(), self.sw_thru_first_name.isChecked()
-                )
-                self.load_data_worker()
-                self.reload_choice_items()
-
-    def on_delete_worker(self, event=None):
-        reply = QMessageBox.question(self, "Delete", "Are you sure you want to delete?",
-                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if reply == QMessageBox.StandardButton.Yes:
-            if self.selected_worker_id:
-                delete_worker_by_id(self.selected_worker_id)
-                self.load_data_worker()
-                self.reload_choice_items()
-
-    def on_select_worker(self):
-        selected = self.list_ctrl_worker.selectedItems()
-        if not selected:
-            return
-        row = self.list_ctrl_worker.currentRow()
-        worker_id = int(self.list_ctrl_worker.item(row, 0).text())
-        if worker_id in self.row_data_sw:
-            worker = self.row_data_sw[worker_id]
-            self.selected_worker_id = worker["id"]
-            self.sw_last_name.setText(worker["sw_lname"])
-            self.sw_first_name.setText(worker["sw_fname"])
-            self.sw_middle_name.setText(worker["sw_mname"])
-            self.sw_thru_first_name.setChecked(bool(worker["search_thru_first_name"]))
 
     def load_data_person(self):
         is_encoded = "1" if self.cb_encoded.isChecked() else "0"
@@ -220,8 +216,8 @@ class MyFrame(QMainWindow):
             self.row_data[row[0]] = {
                 "id": row[0], "encoder_name": row[1], "date_encoded": row[2],
                 "target_sector": row[3], "financial_assist": row[4], "amount": row[5],
-                "fund_source": row[6], "sw_lname": row[7], "sw_fname": row[8],
-                "sw_mname": row[9], "interview_date": row[10], "client_relationship": row[11],
+                "fund_source": row[6], "sw_full_name": row[7],
+                "interview_date": row[10], "client_relationship": row[11],
                 "client_lastname": row[12], "client_firstname": row[13], "client_middlename": row[14],
                 "client_ext": row[15], "client_gender": row[16], "client_bday": row[17],
                 "client_age": row[18], "client_contact_no": row[19], "client_civil_status": row[20],
@@ -233,6 +229,8 @@ class MyFrame(QMainWindow):
                 "bene_city": row[36], "has_beneficiary": row[37], "encoded": row[38],
                 "target_sector_bene": row[39], "mode_release": row[40], "approved_by": row[41],
                 "sub_category": row[42],
+                "client_region": row[43], "client_province": row[44],
+                "bene_region": row[45], "bene_province": row[46],
             }
 
         if 0 <= selected_row < self.list_ctrl.rowCount():
@@ -254,7 +252,7 @@ class MyFrame(QMainWindow):
                 self.financial_assist.currentIndex(),
                 self.amount.text(),
                 self.fund_source.currentIndex(),
-                self.sw_lname.text(), self.sw_fname.text(), self.sw_mname.text(),
+                self.social_worker.currentText(), "", "",
                 get_date_value(self.interview_date),
                 self.client_relationship.currentIndex(),
                 self.client_lastname.text(), self.client_firstname.text(),
@@ -263,8 +261,8 @@ class MyFrame(QMainWindow):
                 get_date_value(self.client_bday), self.client_age.text(),
                 self.client_contact_no.text(),
                 self.client_civil_status.currentIndex(),
-                self.client_house_street.text(), self.client_barangay.text(),
-                self.client_city.currentIndex(),
+                self.client_house_street.text(), self.client_barangay.currentText(),
+                self.client_city.currentText(),
                 self.bene_relationship.currentIndex(),
                 self.bene_lastname.text(), self.bene_firstname.text(),
                 self.bene_middlename.text(), self.bene_ext.text(),
@@ -272,12 +270,14 @@ class MyFrame(QMainWindow):
                 get_date_value(self.bene_bday), self.bene_age.text(),
                 self.bene_contact_no.text(),
                 self.bene_civil_status.currentIndex(),
-                self.bene_house_street.text(), self.bene_barangay.text(),
-                self.bene_city.currentIndex(),
+                self.bene_house_street.text(), self.bene_barangay.currentText(),
+                self.bene_city.currentText(),
                 self.has_beneficiary.isChecked(),
                 self.mode_release.currentIndex(),
                 self.approved_by.currentIndex(),
                 self.sub_category.currentIndex(),
+                self.client_region.currentText(), self.client_province.currentText(),
+                self.bene_region.currentText(), self.bene_province.currentText(),
             ):
                 self.load_data_person()
                 self.on_clear(None)
@@ -299,7 +299,7 @@ class MyFrame(QMainWindow):
                     self.financial_assist.currentIndex(),
                     self.amount.text(),
                     self.fund_source.currentIndex(),
-                    self.sw_lname.text(), self.sw_fname.text(), self.sw_mname.text(),
+                    self.social_worker.currentText(), "", "",
                     get_date_value(self.interview_date),
                     self.client_relationship.currentIndex(),
                     self.client_lastname.text(), self.client_firstname.text(),
@@ -308,8 +308,8 @@ class MyFrame(QMainWindow):
                     get_date_value(self.client_bday), self.client_age.text(),
                     self.client_contact_no.text(),
                     self.client_civil_status.currentIndex(),
-                    self.client_house_street.text(), self.client_barangay.text(),
-                    self.client_city.currentIndex(),
+                    self.client_house_street.text(), self.client_barangay.currentText(),
+                    self.client_city.currentText(),
                     self.bene_relationship.currentIndex(),
                     self.bene_lastname.text(), self.bene_firstname.text(),
                     self.bene_middlename.text(), self.bene_ext.text(),
@@ -317,12 +317,14 @@ class MyFrame(QMainWindow):
                     get_date_value(self.bene_bday), self.bene_age.text(),
                     self.bene_contact_no.text(),
                     self.bene_civil_status.currentIndex(),
-                    self.bene_house_street.text(), self.bene_barangay.text(),
-                    self.bene_city.currentIndex(),
+                    self.bene_house_street.text(), self.bene_barangay.currentText(),
+                    self.bene_city.currentText(),
                     self.has_beneficiary.isChecked(),
                     self.mode_release.currentIndex(),
                     self.approved_by.currentIndex(),
                     self.sub_category.currentIndex(),
+                    self.client_region.currentText(), self.client_province.currentText(),
+                    self.bene_region.currentText(), self.bene_province.currentText(),
                 )
                 self.load_data_person()
                 self.on_clear(None)
@@ -378,8 +380,10 @@ class MyFrame(QMainWindow):
         set_date_value(self.client_bday, person["client_bday"])
         self.client_contact_no.setText(person["client_contact_no"])
         self.client_house_street.setText(person["client_house_street"])
-        self.client_barangay.setText(person["client_barangay"])
-        self.client_city.setCurrentIndex(person["client_city"])
+        self.client_region.setCurrentText(person["client_region"])
+        self.client_province.setCurrentText(person["client_province"])
+        self.client_city.setCurrentText(person["client_city"])
+        self.client_barangay.setCurrentText(person["client_barangay"])
         self.target_sector.setCurrentIndex(person["target_sector"])
 
         self.bene_lastname.setText(person["bene_lastname"])
@@ -393,8 +397,10 @@ class MyFrame(QMainWindow):
         set_date_value(self.bene_bday, person["bene_bday"])
         self.bene_contact_no.setText(person["bene_contact_no"])
         self.bene_house_street.setText(person["bene_house_street"])
-        self.bene_barangay.setText(person["bene_barangay"])
-        self.bene_city.setCurrentIndex(person["bene_city"])
+        self.bene_region.setCurrentText(person["bene_region"])
+        self.bene_province.setCurrentText(person["bene_province"])
+        self.bene_city.setCurrentText(person["bene_city"])
+        self.bene_barangay.setCurrentText(person["bene_barangay"])
 
         self.financial_assist.setCurrentIndex(person["financial_assist"])
         self.mode_release.setCurrentIndex(person["mode_release"])
@@ -402,48 +408,53 @@ class MyFrame(QMainWindow):
         self.sub_category.setCurrentIndex(person["sub_category"])
         self.amount.setText(person["amount"])
         self.fund_source.setCurrentIndex(person["fund_source"])
-        self.sw_lname.setText(person["sw_lname"])
-        self.sw_fname.setText(person["sw_fname"])
-        self.sw_mname.setText(person["sw_mname"])
         set_date_value(self.interview_date, person["interview_date"])
         self.has_beneficiary.setChecked(bool(person["has_beneficiary"]))
-        self.sw_last_name.setText(person["sw_lname"])
-        self.sw_first_name.setText(person["sw_fname"])
-        self.sw_middle_name.setText(person["sw_mname"])
 
-        data_id = get_worker_id(person["sw_lname"], person["sw_fname"], person["sw_mname"])
-        if data_id:
-            for index, (id_value, lname, fname, mname, thru) in enumerate(self.social_worker_list):
-                if id_value == data_id[0]:
-                    self.social_worker.setCurrentIndex(index)
-                    break
-        else:
+        try:
+            self.social_worker.setCurrentIndex(self.social_worker_choices.index(person["sw_full_name"]))
+        except ValueError:
             self.social_worker.setCurrentIndex(-1)
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Client Assistance Form")
-        self.resize(700, 700)
+        self.resize(760, 760)
+        self.setStyleSheet(STYLESHEET)
 
         self.selected_person_id = None
-        self.selected_worker_id = None
         self.driver = None
         self.is_running = False
         self.stop_requested = False
         self.is_auto_fill = False
         self.is_finished_refresh = False
 
+        self.city_config = self._load_city_config()
+        self.barangays_by_city = self._load_barangays_by_city()
+        self.barangay_website_map = self._load_barangay_website_map()
+        self.region_options = self._load_region_list()
+        self.region_gform_map = self._load_region_gform_map()
+        self.provinces_by_region = self._load_provinces_by_region()
+        self.province_gform_map = self._load_province_gform_map()
+        self.province_website_map = self._load_province_website_map()
+        self.province_options = [p for provinces in self.provinces_by_region.values() for p in provinces]
+        self.cities_by_province = self._load_cities_by_province()
+        self.city_website_map = {city: info["city_website"] for city, info in self.city_config.items()}
+
         keyboard.add_hotkey('shift+enter', self.on_add_person)
 
         central = QWidget()
         self.setCentralWidget(central)
         self.sizer = QVBoxLayout(central)
+        self.sizer.setContentsMargins(10, 10, 10, 10)
+        self.sizer.setSpacing(6)
 
         # ── Scrollable area ──────────────────────────────────────────────
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         scroll_widget = QWidget()
         self.scroll_sizer = QVBoxLayout(scroll_widget)
+        self.scroll_sizer.setContentsMargins(0, 0, 0, 0)
         scroll_area.setWidget(scroll_widget)
 
         # ── Tab Widget ───────────────────────────────────────────────────
@@ -451,19 +462,27 @@ class MyFrame(QMainWindow):
 
         client_panel = QWidget()
         bene_panel = QWidget()
-        sw_panel = QWidget()
 
         box_sizer_client = QVBoxLayout(client_panel)
+        box_sizer_client.setContentsMargins(10, 10, 10, 10)
+        box_sizer_client.setSpacing(4)
         box_sizer_bene = QVBoxLayout(bene_panel)
-        box_sizer_sw = QVBoxLayout(sw_panel)
+        box_sizer_bene.setContentsMargins(10, 10, 10, 10)
+        box_sizer_bene.setSpacing(4)
 
         # ── Client Tab ───────────────────────────────────────────────────
         self.has_beneficiary = QCheckBox("Has Beneficiary")
         self.has_beneficiary.stateChanged.connect(self.has_beneficiary_event)
         box_sizer_client.addWidget(self.has_beneficiary)
 
-        self.relationship_choices = [name for _, name in relationship_list]
-        self.relationship_data_map = {value: name for name, value in relationship_list}
+        relationship_rows = self._get_list_rows("relationship_list")
+        self.relationship_choices = [col2 for _id, col1, col2, extra, extra2 in relationship_rows]
+        # GForm submission still reverse-looks-up to the Label (col1) for now, pending a
+        # live-form check on whether GForm Value is actually the correct radio-button text.
+        self.relationship_gform_map = {col2: col1 for _id, col1, col2, extra, extra2 in relationship_rows}
+        # Website already correctly used the dropdown's own displayed text (col2); this map
+        # makes that independently editable via Website Value instead of implicitly col2 itself.
+        self.relationship_website_map = {col2: (extra2 or col2) for _id, col1, col2, extra, extra2 in relationship_rows}
 
         box_sizer_client.addWidget(QLabel("Relationship to bene:"))
         self.client_relationship = NoScrollComboBox()
@@ -490,15 +509,21 @@ class MyFrame(QMainWindow):
         cl_gender_civil = QHBoxLayout()
         cl_gender_col = QVBoxLayout()
         cl_gender_col.addWidget(QLabel("Gender"))
+        gender_rows = self._get_list_rows("gender_list")
+        self.gender_options = [col1 for _id, col1, col2, extra, extra2 in gender_rows]
+        self.gender_gform_map = {col1: (col2 or col1) for _id, col1, col2, extra, extra2 in gender_rows}
+        self.gender_website_map = {col1: (extra2 or col1) for _id, col1, col2, extra, extra2 in gender_rows}
         self.client_gender = NoScrollComboBox()
-        self.client_gender.addItems(gender_list)
+        self.client_gender.addItems(self.gender_options)
         self.client_gender.setCurrentIndex(0)
         self.client_gender.currentIndexChanged.connect(self.on_choice_change_client)
         cl_gender_col.addWidget(self.client_gender)
         cl_gender_civil.addLayout(cl_gender_col)
 
-        self.civil_status_choices = [name for _, name in civil_status_list]
-        self.civil_status_data_map = {value: name for name, value in civil_status_list}
+        civil_status_rows = self._get_list_rows("civil_status_list")
+        self.civil_status_choices = [col1 for _id, col1, col2, extra, extra2 in civil_status_rows]
+        self.civil_status_gform_map = {col1: (col2 or col1) for _id, col1, col2, extra, extra2 in civil_status_rows}
+        self.civil_status_website_map = {col1: (extra2 or col1) for _id, col1, col2, extra, extra2 in civil_status_rows}
         cl_civil_col = QVBoxLayout()
         cl_civil_col.addWidget(QLabel("Civil Status"))
         self.client_civil_status = NoScrollComboBox()
@@ -524,30 +549,56 @@ class MyFrame(QMainWindow):
         self.client_contact_no = AllCapsLineEdit()
         box_sizer_client.addWidget(self.client_contact_no)
 
-        cl_address = QHBoxLayout()
-        cl_house_col = QVBoxLayout()
-        cl_house_col.addWidget(QLabel("House | Street No:"))
-        self.client_house_street = AllCapsLineEdit()
-        cl_house_col.addWidget(self.client_house_street)
-        cl_address.addLayout(cl_house_col)
+        cl_address_row1 = QHBoxLayout()
+        cl_region_col = QVBoxLayout()
+        cl_region_col.addWidget(QLabel("Region"))
+        self.client_region = NoScrollComboBox()
+        self.client_region.addItems(self.region_options)
+        cl_region_col.addWidget(self.client_region)
+        cl_address_row1.addLayout(cl_region_col)
 
-        cl_brgy_col = QVBoxLayout()
-        cl_brgy_col.addWidget(QLabel("Barangay"))
-        self.client_barangay = QLineEdit()
-        cl_brgy_col.addWidget(self.client_barangay)
-        cl_address.addLayout(cl_brgy_col)
+        cl_province_col = QVBoxLayout()
+        cl_province_col.addWidget(QLabel("Province"))
+        self.client_province = NoScrollComboBox()
+        self.client_province.addItems(self.provinces_by_region.get(self.client_region.currentText(), []))
+        cl_province_col.addWidget(self.client_province)
+        cl_address_row1.addLayout(cl_province_col)
+
+        self.client_region.currentIndexChanged.connect(self.on_client_region_changed)
+        self.client_province.currentIndexChanged.connect(self.on_client_province_changed)
 
         cl_city_col = QVBoxLayout()
         cl_city_col.addWidget(QLabel("City | Municipality"))
         self.client_city = NoScrollComboBox()
-        self.client_city.addItems(list_of_city)
+        self.client_city.addItems(self.cities_by_province.get(self.client_province.currentText(), []))
+        self.client_city.currentIndexChanged.connect(self.on_client_city_changed)
         cl_city_col.addWidget(self.client_city)
-        cl_address.addLayout(cl_city_col)
-        box_sizer_client.addLayout(cl_address)
+        cl_address_row1.addLayout(cl_city_col)
+        box_sizer_client.addLayout(cl_address_row1)
+
+        cl_address_row2 = QHBoxLayout()
+        cl_house_col = QVBoxLayout()
+        cl_house_col.addWidget(QLabel("House | Street No:"))
+        self.client_house_street = AllCapsLineEdit()
+        cl_house_col.addWidget(self.client_house_street)
+        cl_address_row2.addLayout(cl_house_col, 6)
+
+        cl_brgy_col = QVBoxLayout()
+        cl_brgy_col.addWidget(QLabel("Barangay"))
+        self.client_barangay = NoScrollComboBox()
+        self.client_barangay.setEditable(True)
+        cl_brgy_col.addWidget(self.client_barangay)
+        cl_address_row2.addLayout(cl_brgy_col, 4)
+        box_sizer_client.addLayout(cl_address_row2)
+
+        target_sector_rows = self._get_list_rows("target_sector_list")
+        self.target_sector_options = [col1 for _id, col1, col2, extra, extra2 in target_sector_rows]
+        self.target_sector_gform_map = {col1: (col2 or col1) for _id, col1, col2, extra, extra2 in target_sector_rows}
+        self.target_sector_website_map = {col1: (extra2 or col1) for _id, col1, col2, extra, extra2 in target_sector_rows}
 
         box_sizer_client.addWidget(QLabel("Target Sector"))
         self.target_sector = NoScrollComboBox()
-        self.target_sector.addItems(target_sector_list)
+        self.target_sector.addItems(self.target_sector_options)
         self.target_sector.setCurrentIndex(0)
         box_sizer_client.addWidget(self.target_sector)
 
@@ -590,7 +641,7 @@ class MyFrame(QMainWindow):
         bene_gender_col = QVBoxLayout()
         bene_gender_col.addWidget(QLabel("Gender"))
         self.bene_gender = NoScrollComboBox()
-        self.bene_gender.addItems(gender_list)
+        self.bene_gender.addItems(self.gender_options)
         self.bene_gender.setCurrentIndex(0)
         self.bene_gender.currentIndexChanged.connect(self.on_choice_change_bene)
         bene_gender_col.addWidget(self.bene_gender)
@@ -619,81 +670,64 @@ class MyFrame(QMainWindow):
         self.bene_contact_no = AllCapsLineEdit()
         box_sizer_bene.addWidget(self.bene_contact_no)
 
-        bene_address = QHBoxLayout()
-        bene_house_col = QVBoxLayout()
-        bene_house_col.addWidget(QLabel("House | Street No:"))
-        self.bene_house_street = AllCapsLineEdit()
-        bene_house_col.addWidget(self.bene_house_street)
-        bene_address.addLayout(bene_house_col)
+        bene_address_row1 = QHBoxLayout()
+        bene_region_col = QVBoxLayout()
+        bene_region_col.addWidget(QLabel("Region"))
+        self.bene_region = NoScrollComboBox()
+        self.bene_region.addItems(self.region_options)
+        bene_region_col.addWidget(self.bene_region)
+        bene_address_row1.addLayout(bene_region_col)
 
-        bene_brgy_col = QVBoxLayout()
-        bene_brgy_col.addWidget(QLabel("Barangay"))
-        self.bene_barangay = AllCapsLineEdit()
-        bene_brgy_col.addWidget(self.bene_barangay)
-        bene_address.addLayout(bene_brgy_col)
+        bene_province_col = QVBoxLayout()
+        bene_province_col.addWidget(QLabel("Province"))
+        self.bene_province = NoScrollComboBox()
+        self.bene_province.addItems(self.provinces_by_region.get(self.bene_region.currentText(), []))
+        bene_province_col.addWidget(self.bene_province)
+        bene_address_row1.addLayout(bene_province_col)
+
+        self.bene_region.currentIndexChanged.connect(self.on_bene_region_changed)
+        self.bene_province.currentIndexChanged.connect(self.on_bene_province_changed)
 
         bene_city_col = QVBoxLayout()
         bene_city_col.addWidget(QLabel("City | Municipality"))
         self.bene_city = NoScrollComboBox()
-        self.bene_city.addItems(list_of_city)
+        self.bene_city.addItems(self.cities_by_province.get(self.bene_province.currentText(), []))
+        self.bene_city.currentIndexChanged.connect(self.on_bene_city_changed)
         bene_city_col.addWidget(self.bene_city)
-        bene_address.addLayout(bene_city_col)
-        box_sizer_bene.addLayout(bene_address)
+        bene_address_row1.addLayout(bene_city_col)
+        box_sizer_bene.addLayout(bene_address_row1)
+
+        bene_address_row2 = QHBoxLayout()
+        bene_house_col = QVBoxLayout()
+        bene_house_col.addWidget(QLabel("House | Street No:"))
+        self.bene_house_street = AllCapsLineEdit()
+        bene_house_col.addWidget(self.bene_house_street)
+        bene_address_row2.addLayout(bene_house_col, 6)
+
+        bene_brgy_col = QVBoxLayout()
+        bene_brgy_col.addWidget(QLabel("Barangay"))
+        self.bene_barangay = NoScrollComboBox()
+        self.bene_barangay.setEditable(True)
+        bene_brgy_col.addWidget(self.bene_barangay)
+        bene_address_row2.addLayout(bene_brgy_col, 4)
+        box_sizer_bene.addLayout(bene_address_row2)
 
         box_sizer_bene.addWidget(QLabel("Target Sector Beneficiary"))
         self.target_sector_bene = NoScrollComboBox()
-        self.target_sector_bene.addItems(target_sector_list)
+        self.target_sector_bene.addItems(self.target_sector_options)
         self.target_sector_bene.setCurrentIndex(0)
         box_sizer_bene.addWidget(self.target_sector_bene)
 
         notebook.addTab(bene_panel, "Beneficiary Details")
 
-        # ── Social Worker Tab ────────────────────────────────────────────
-        box_sizer_sw.addSpacing(10)
-        sw_caption_sizer = QHBoxLayout()
-        sw_caption_sizer.addWidget(QLabel("Fullname (SW)"))
-        self.sw_thru_first_name = QCheckBox("Search thru Firstname")
-        sw_caption_sizer.addWidget(self.sw_thru_first_name)
-        box_sizer_sw.addLayout(sw_caption_sizer)
-
-        self.sw_last_name = QLineEdit()
-        self.sw_last_name.setPlaceholderText("Last Name")
-        self.sw_first_name = QLineEdit()
-        self.sw_first_name.setPlaceholderText("First Name")
-        self.sw_middle_name = QLineEdit()
-        self.sw_middle_name.setPlaceholderText("Middle Name")
-        sw_fullname_sizer = QHBoxLayout()
-        sw_fullname_sizer.addWidget(self.sw_last_name)
-        sw_fullname_sizer.addWidget(self.sw_first_name)
-        sw_fullname_sizer.addWidget(self.sw_middle_name)
-        box_sizer_sw.addLayout(sw_fullname_sizer)
-
-        btn_sw_add = QPushButton("Add")
-        btn_sw_update = QPushButton("Update")
-        btn_sw_delete = QPushButton("Delete")
-        btn_sw_add.clicked.connect(self.on_add_worker)
-        btn_sw_update.clicked.connect(self.on_update_worker)
-        btn_sw_delete.clicked.connect(self.on_delete_worker)
-        sw_btn_sizer = QHBoxLayout()
-        sw_btn_sizer.addWidget(btn_sw_add)
-        sw_btn_sizer.addWidget(btn_sw_update)
-        sw_btn_sizer.addWidget(btn_sw_delete)
-        box_sizer_sw.addLayout(sw_btn_sizer)
-
-        self.list_ctrl_worker = QTableWidget(0, 5)
-        self.list_ctrl_worker.setHorizontalHeaderLabels(["ID", "Lastname", "Firstname", "Middlename", "Thru Firstname"])
-        self.list_ctrl_worker.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.list_ctrl_worker.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.list_ctrl_worker.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.list_ctrl_worker.itemSelectionChanged.connect(self.on_select_worker)
-        box_sizer_sw.addWidget(self.list_ctrl_worker)
-
-        notebook.addTab(sw_panel, "Social Worker")
-
         self.scroll_sizer.addWidget(notebook, 1)
 
         # ── Assistance Section (below tabs) ─────────────────────────────
-        assist_box = QVBoxLayout()
+        assist_card = QFrame()
+        assist_card.setObjectName("card")
+        assist_box = QVBoxLayout(assist_card)
+        assist_box.setContentsMargins(10, 10, 10, 10)
+        assist_box.setSpacing(4)
 
         assistance_sizer = QHBoxLayout()
         amount_col = QVBoxLayout()
@@ -704,22 +738,30 @@ class MyFrame(QMainWindow):
 
         release_col = QVBoxLayout()
         release_col.addWidget(QLabel("Mode of Release"))
+        mode_release_rows = self._get_list_rows("mode_of_release")
+        self.mode_release_options = [col1 for _id, col1, col2, extra, extra2 in mode_release_rows]
+        self.mode_release_gform_map = {col1: (col2 or col1) for _id, col1, col2, extra, extra2 in mode_release_rows}
+        self.mode_release_website_map = {col1: (extra2 or col1) for _id, col1, col2, extra, extra2 in mode_release_rows}
         self.mode_release = NoScrollComboBox()
-        self.mode_release.addItems(mode_of_release)
+        self.mode_release.addItems(self.mode_release_options)
         self.mode_release.setCurrentIndex(0)
         release_col.addWidget(self.mode_release)
         assistance_sizer.addLayout(release_col)
 
         financial_col = QVBoxLayout()
         financial_col.addWidget(QLabel("Assistance"))
+        financial_assist_rows = self._get_list_rows("financial_assistance_list")
+        self.financial_assist_options = [col1 for _id, col1, col2, extra, extra2 in financial_assist_rows]
         self.financial_assist = NoScrollComboBox()
-        self.financial_assist.addItems(financial_assistance_list)
+        self.financial_assist.addItems(self.financial_assist_options)
         self.financial_assist.setCurrentIndex(4)
         financial_col.addWidget(self.financial_assist)
         assistance_sizer.addLayout(financial_col)
 
-        self.fund_source_choices = [name for _, name in fund_source_list]
-        self.fund_source_data_map = {value: name for name, value in fund_source_list}
+        fund_source_rows = self._get_list_rows("fund_source_list")
+        self.fund_source_choices = [col1 for _id, col1, col2, extra, extra2 in fund_source_rows]
+        self.fund_source_gform_map = {col1: (col2 or col1) for _id, col1, col2, extra, extra2 in fund_source_rows}
+        self.fund_source_website_map = {col1: (extra2 or col1) for _id, col1, col2, extra, extra2 in fund_source_rows}
         fund_col = QVBoxLayout()
         fund_col.addWidget(QLabel("Fund Source:"))
         self.fund_source = NoScrollComboBox()
@@ -732,15 +774,23 @@ class MyFrame(QMainWindow):
         mode_sizer = QHBoxLayout()
         subcat_col = QVBoxLayout()
         subcat_col.addWidget(QLabel("Sub Category"))
+        sub_category_rows = self._get_list_rows("client_sub_category")
+        self.sub_category_options = [col1 for _id, col1, col2, extra, extra2 in sub_category_rows]
+        self.sub_category_gform_map = {col1: (col2 or col1) for _id, col1, col2, extra, extra2 in sub_category_rows}
+        self.sub_category_website_map = {col1: (extra2 or col1) for _id, col1, col2, extra, extra2 in sub_category_rows}
         self.sub_category = NoScrollComboBox()
-        self.sub_category.addItems(list(client_sub_category.keys()))
+        self.sub_category.addItems(self.sub_category_options)
         subcat_col.addWidget(self.sub_category)
         mode_sizer.addLayout(subcat_col)
+
+        mode_of_admission_rows = self._get_list_rows("mode_of_admission_list")
+        self.mode_of_admission_options = [col1 for _id, col1, col2, extra, extra2 in mode_of_admission_rows]
+        self.mode_of_admission_map = {col1: (col2 or col1) for _id, col1, col2, extra, extra2 in mode_of_admission_rows}
 
         mode_admit_col = QVBoxLayout()
         mode_admit_col.addWidget(QLabel("Mode of Admission:"))
         self.mode_of_admission = NoScrollComboBox()
-        self.mode_of_admission.addItems(["On-site", "Walk-in", "Referral"])
+        self.mode_of_admission.addItems(self.mode_of_admission_options)
         self.mode_of_admission.setCurrentIndex(1)
         mode_admit_col.addWidget(self.mode_of_admission)
         mode_sizer.addLayout(mode_admit_col)
@@ -756,88 +806,85 @@ class MyFrame(QMainWindow):
         assist_box.addLayout(mode_sizer)
 
         self.social_worker_list = get_all_workers()
-        self.social_worker_choices = [f"{fname}, {mname}, {lname}" for (_id, lname, fname, mname, _thru) in self.social_worker_list]
+        self.social_worker_choices = [full_name for (_id, full_name, _gform, _website) in self.social_worker_list]
 
         worker_label_sizer = QHBoxLayout()
         worker_label_sizer.addWidget(QLabel("Social Worker"))
         assist_box.addLayout(worker_label_sizer)
 
         worker_sizer = QHBoxLayout()
-        self.social_worker_filter = QLineEdit()
-        self.social_worker_filter.textChanged.connect(self.on_sw_text_change)
-        worker_sizer.addWidget(self.social_worker_filter, 2)
         self.social_worker = NoScrollComboBox()
         self.social_worker.addItems(self.social_worker_choices)
-        self.social_worker.currentIndexChanged.connect(self.on_selection_worker)
+        self.social_worker.setEditable(True)
+        self.social_worker.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.social_worker.lineEdit().editingFinished.connect(self.on_social_worker_editing_finished)
         worker_sizer.addWidget(self.social_worker, 8)
         assist_box.addLayout(worker_sizer)
-
-        self.sw_lname = QLineEdit()
-        self.sw_lname.setPlaceholderText("Lastname")
-        self.sw_lname.hide()
-        self.sw_fname = QLineEdit()
-        self.sw_fname.setPlaceholderText("Firstname")
-        self.sw_fname.hide()
-        self.sw_mname = QLineEdit()
-        self.sw_mname.setPlaceholderText("Middlename")
-        self.sw_mname.hide()
-
-        sw_fullname_sizer2 = QHBoxLayout()
-        sw_fullname_sizer2.addWidget(self.sw_lname)
-        sw_fullname_sizer2.addWidget(self.sw_fname)
-        sw_fullname_sizer2.addWidget(self.sw_mname)
-        self.thru_firstname = QCheckBox("Search thru Firstname")
-        self.thru_firstname.hide()
-        assist_box.addLayout(sw_fullname_sizer2)
 
         self.encode_id = QLineEdit()
         self.encode_id.hide()
 
-        sep1 = QFrame()
-        sep1.setFrameShape(QFrame.Shape.HLine)
-        assist_box.addWidget(sep1)
+        self.scroll_sizer.addWidget(assist_card)
 
-        assist_box.addWidget(QLabel("Encoder Name:"))
+        # ── Encoder Section ───────────────────────────────────────────────
+        encoder_card = QFrame()
+        encoder_card.setObjectName("card")
+        encoder_box = QVBoxLayout(encoder_card)
+        encoder_box.setContentsMargins(10, 10, 10, 10)
+        encoder_box.setSpacing(4)
+
+        encoder_box.addWidget(QLabel("Encoder Name:"))
         self.encoder_name = AllCapsLineEdit()
-        assist_box.addWidget(self.encoder_name)
+        encoder_box.addWidget(self.encoder_name)
 
-        assist_box.addWidget(QLabel("Approved By:"))
+        approved_by_rows = self._get_list_rows("approved_by_list")
+        self.approved_by_options = [col1 for _id, col1, col2, extra, extra2 in approved_by_rows]
+        self.approved_by_gform_map = {col1: (col2 or col1) for _id, col1, col2, extra, extra2 in approved_by_rows}
+        self.approved_by_website_map = {col1: (extra2 or col1) for _id, col1, col2, extra, extra2 in approved_by_rows}
+
+        encoder_box.addWidget(QLabel("Approved By:"))
         self.approved_by = NoScrollComboBox()
-        self.approved_by.addItems(list(approved_by_list.keys()))
-        assist_box.addWidget(self.approved_by)
+        self.approved_by.addItems(self.approved_by_options)
+        encoder_box.addWidget(self.approved_by)
 
-        assist_box.addWidget(QLabel("Date Entered:"))
+        encoder_box.addWidget(QLabel("Date Entered:"))
         self.encoded_date = _QDE()
         self.encoded_date.setCalendarPopup(True)
         self.encoded_date.setDate(QDate.currentDate())
-        assist_box.addWidget(self.encoded_date)
+        encoder_box.addWidget(self.encoded_date)
 
-        sep2 = QFrame()
-        sep2.setFrameShape(QFrame.Shape.HLine)
-        self.scroll_sizer.addWidget(sep2)
-        self.scroll_sizer.addLayout(assist_box)
+        self.scroll_sizer.addWidget(encoder_card)
 
         # ── CRUD + Table section ─────────────────────────────────────────
-        crud_container = QVBoxLayout()
+        crud_card = QFrame()
+        crud_card.setObjectName("card")
+        crud_container = QVBoxLayout(crud_card)
+        crud_container.setContentsMargins(10, 10, 10, 10)
+        crud_container.setSpacing(4)
 
         self.auto_next = QCheckBox("Auto Next")
         self.auto_submit = QCheckBox("Auto Submit")
         self.auto_finish = QCheckBox("Auto Finish")
 
         btn_crud_add = QPushButton("Add")
+        btn_crud_add.setObjectName("addBtn")
         btn_crud_update = QPushButton("Update")
+        btn_crud_update.setObjectName("updateBtn")
         btn_crud_delete = QPushButton("Delete")
+        btn_crud_delete.setObjectName("deleteBtn")
         btn_crud_add.clicked.connect(self.on_add_person)
         btn_crud_update.clicked.connect(self.on_update_person)
         btn_crud_delete.clicked.connect(self.on_delete_person)
 
         btn_set_encoded = QPushButton("Set Encoded")
+        btn_set_encoded.setObjectName("clearBtn")
         btn_set_encoded.clicked.connect(self.on_set_encoded)
 
         self.cb_encoded = QCheckBox("Encoded")
         self.cb_encoded.stateChanged.connect(self.on_checkbox_change)
 
         btn_export = QPushButton("Export")
+        btn_export.setObjectName("clearBtn")
         btn_export.clicked.connect(self.on_export)
 
         control_container = QHBoxLayout()
@@ -859,23 +906,32 @@ class MyFrame(QMainWindow):
         self.list_ctrl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.list_ctrl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.list_ctrl.itemSelectionChanged.connect(self.on_select_person)
+        set_table_visible_rows(self.list_ctrl, 5)
         crud_container.addWidget(self.list_ctrl)
 
         # ── Auto Fill section ────────────────────────────────────────────
-        autofill_container = QVBoxLayout()
+        autofill_card = QFrame()
+        autofill_card.setObjectName("card")
+        autofill_container = QVBoxLayout(autofill_card)
+        autofill_container.setContentsMargins(10, 10, 10, 10)
+        autofill_container.setSpacing(4)
 
         self.fill_forms_btn = QPushButton("Fill Form")
+        self.fill_forms_btn.setObjectName("addBtn")
         self.fill_forms_btn.clicked.connect(self.on_button_click)
         self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.setObjectName("clearBtn")
         self.refresh_btn.clicked.connect(self.on_refresh)
         self.cb_website = QCheckBox("WEB")
         self.cb_offline = QCheckBox("OFF")
         self.cb_mov = QCheckBox("MOV")
 
         btn_stop = QPushButton("Stop")
+        btn_stop.setObjectName("deleteBtn")
         btn_stop.clicked.connect(self.on_stop)
 
         btn_auto_fill = QPushButton("Auto Fill")
+        btn_auto_fill.setObjectName("addBtn")
         btn_auto_fill.clicked.connect(self.on_auto_fill)
 
         hbox_btns = QHBoxLayout()
@@ -893,20 +949,19 @@ class MyFrame(QMainWindow):
 
         self.command_log = QTextEdit()
         self.command_log.setReadOnly(True)
-        self.command_log.setMinimumHeight(50)
-        self.command_log.setMaximumHeight(100)
+        set_textedit_visible_rows(self.command_log, 3)
+        # Every append() call site (there are dozens, scattered across the Selenium
+        # automation helpers below, not just the thread-safe _sig_log path) should
+        # keep the latest line in view — react to textChanged instead of wrapping
+        # each call site individually.
+        self.command_log.textChanged.connect(self._scroll_log_to_bottom)
         autofill_container.addWidget(self.command_log)
 
         autofill_container.addWidget(btn_auto_fill)
 
-        self.sizer.addWidget(scroll_area, 6)
-        crud_w = QWidget()
-        crud_w.setLayout(crud_container)
-        self.sizer.addWidget(crud_w, 3)
-
-        autofill_w = QWidget()
-        autofill_w.setLayout(autofill_container)
-        self.sizer.addWidget(autofill_w, 1)
+        self.sizer.addWidget(scroll_area, 1)
+        self.sizer.addWidget(crud_card)
+        self.sizer.addWidget(autofill_card)
 
         # Connect thread-safe signals
         self._sig_log.connect(self.command_log.append)
@@ -917,13 +972,273 @@ class MyFrame(QMainWindow):
 
         self.on_check_pickle()
         self.load_data_person()
-        self.load_data_worker()
 
     def _show_msg_box(self, title, message, kind):
         if kind == "error":
             QMessageBox.critical(self, title, message)
         else:
             QMessageBox.information(self, title, message)
+
+    def _scroll_log_to_bottom(self):
+        scrollbar = self.command_log.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def _get_list_rows(self, key):
+        """Return get_items() rows (id, col1, col2, extra, extra2) for the config list with this key, or []."""
+        for list_id, list_key, label, kind, col1_label, col2_label in get_all_lists():
+            if list_key == key:
+                return get_items(list_id)
+        return []
+
+    def _load_city_config(self):
+        """Build {city: {"province", "region_gform", "region_website", "city_gform",
+        "city_website"}} from list_of_city config rows (extra column holds the linked
+        province's config_items.id). region_gform/region_website are derived by walking
+        city -> province -> region (each linked by id) rather than being duplicated on
+        every city row, so a renamed province/region doesn't silently orphan its cities.
+        city_gform/city_website are the city's own values (e.g. "CITY OF CALOOCAN"'s
+        website value is "KALOOKAN CITY")."""
+        region_by_id = {}
+        for list_id, key, label, kind, col1_label, col2_label in get_all_lists():
+            if key != "region_list":
+                continue
+            for item_id, region_label, region_gform, _extra, region_website in get_items(list_id):
+                region_by_id[str(item_id)] = {
+                    "gform": region_gform or region_label,
+                    "website": region_website or region_label,
+                }
+            break
+
+        province_by_id = {}
+        for list_id, key, label, kind, col1_label, col2_label in get_all_lists():
+            if key != "province_list":
+                continue
+            for item_id, province_label, _col2, region_id, _extra2 in get_items(list_id):
+                province_by_id[str(item_id)] = {"label": province_label, "region_id": region_id}
+            break
+
+        city_config = {}
+        for list_id, key, label, kind, col1_label, col2_label in get_all_lists():
+            if key != "list_of_city":
+                continue
+            for _item_id, city, city_gform, province_id, city_website in get_items(list_id):
+                province_info = province_by_id.get(province_id, {})
+                region_info = region_by_id.get(province_info.get("region_id"), {})
+                city_config[city] = {
+                    "province": province_info.get("label") or "NCR THIRD DISTRICT",
+                    "region_gform": region_info.get("gform") or "NCR (National Capital Region)",
+                    "region_website": region_info.get("website") or "NCR [National Capital Region]",
+                    "city_gform": city_gform or city,
+                    "city_website": city_website or city,
+                }
+            break
+        return city_config
+
+    def _load_barangays_by_city(self):
+        """Build {city label: [barangay, ...]} from barangay_list config rows (extra
+        column holds the linked city's config_items.id, not its label, so a renamed
+        city doesn't silently orphan its barangays)."""
+        city_labels_by_id = {}
+        for list_id, key, label, kind, col1_label, col2_label in get_all_lists():
+            if key != "list_of_city":
+                continue
+            for item_id, city_label, _col2, _extra, _extra2 in get_items(list_id):
+                city_labels_by_id[str(item_id)] = city_label
+            break
+
+        barangays_by_city = {}
+        for list_id, key, label, kind, col1_label, col2_label in get_all_lists():
+            if key != "barangay_list":
+                continue
+            for _item_id, barangay, _col2, city_id, _extra2 in get_items(list_id):
+                city_label = city_labels_by_id.get(city_id)
+                if city_label is None:
+                    continue
+                barangays_by_city.setdefault(city_label, []).append(barangay)
+            break
+        return barangays_by_city
+
+    def _load_region_list(self):
+        """Build [region, ...] from region_list config rows."""
+        for list_id, key, label, kind, col1_label, col2_label in get_all_lists():
+            if key != "region_list":
+                continue
+            return [col1 for _item_id, col1, _col2, _extra, _extra2 in get_items(list_id)]
+        return []
+
+    def _load_region_gform_map(self):
+        """Build {region label: GForm value} from region_list config rows."""
+        for list_id, key, label, kind, col1_label, col2_label in get_all_lists():
+            if key != "region_list":
+                continue
+            return {col1: (col2 or col1) for _item_id, col1, col2, _extra, _extra2 in get_items(list_id)}
+        return {}
+
+    def _load_province_gform_map(self):
+        """Build {province label: GForm value} from province_list config rows."""
+        for list_id, key, label, kind, col1_label, col2_label in get_all_lists():
+            if key != "province_list":
+                continue
+            return {col1: (col2 or col1) for _item_id, col1, col2, _extra, _extra2 in get_items(list_id)}
+        return {}
+
+    def _load_province_website_map(self):
+        """Build {province label: Website Value} from province_list config rows."""
+        for list_id, key, label, kind, col1_label, col2_label in get_all_lists():
+            if key != "province_list":
+                continue
+            return {col1: (extra2 or col1) for _item_id, col1, _col2, _extra, extra2 in get_items(list_id)}
+        return {}
+
+    def _load_barangay_website_map(self):
+        """Build {(city label, barangay label): Website Value} from barangay_list
+        config rows (extra column holds the linked city's config_items.id, not its
+        label). Keyed by city too, not just barangay label, since barangay names
+        repeat across different cities."""
+        city_labels_by_id = {}
+        for list_id, key, label, kind, col1_label, col2_label in get_all_lists():
+            if key != "list_of_city":
+                continue
+            for item_id, city_label, _col2, _extra, _extra2 in get_items(list_id):
+                city_labels_by_id[str(item_id)] = city_label
+            break
+
+        barangay_website_map = {}
+        for list_id, key, label, kind, col1_label, col2_label in get_all_lists():
+            if key != "barangay_list":
+                continue
+            for _item_id, barangay, _col2, city_id, extra2 in get_items(list_id):
+                city_label = city_labels_by_id.get(city_id)
+                if city_label is None:
+                    continue
+                barangay_website_map[(city_label, barangay)] = extra2 or barangay
+            break
+        return barangay_website_map
+
+    def _load_provinces_by_region(self):
+        """Build {region_label: [province, ...]} from province_list config rows
+        (extra column holds the linked region's config_items.id, not its label,
+        so a renamed region doesn't silently orphan its provinces)."""
+        region_labels_by_id = {}
+        for list_id, key, label, kind, col1_label, col2_label in get_all_lists():
+            if key != "region_list":
+                continue
+            for item_id, region_label, _col2, _extra, _extra2 in get_items(list_id):
+                region_labels_by_id[str(item_id)] = region_label
+            break
+
+        provinces_by_region = {}
+        for list_id, key, label, kind, col1_label, col2_label in get_all_lists():
+            if key != "province_list":
+                continue
+            for _item_id, province, _col2, region_id, _extra2 in get_items(list_id):
+                region_label = region_labels_by_id.get(region_id)
+                if region_label is None:
+                    continue
+                provinces_by_region.setdefault(region_label, []).append(province)
+            break
+        return provinces_by_region
+
+    def _load_cities_by_province(self):
+        """Build {province: [city, ...]} from self.city_config's province field."""
+        cities_by_province = {}
+        for city, info in self.city_config.items():
+            province = info["province"] if info["province"] in self.province_options else "NCR THIRD DISTRICT"
+            cities_by_province.setdefault(province, []).append(city)
+        return cities_by_province
+
+    def _city_lookup(self, city):
+        return self.city_config.get(city, {
+            "province": "NCR THIRD DISTRICT",
+            "region_gform": "NCR (National Capital Region)",
+            "region_website": "NCR [National Capital Region]",
+            "city_gform": city,
+            "city_website": city,
+        })
+
+    def _resolve_pickle_city(self, value):
+        """Old data-new.pkl files (saved before the City->Province migration) stored
+        client_city/bene_city as the City combobox's currentIndex() (int), not its
+        name. Resolve that to a city name using the fixed list_of_city order the
+        index was originally saved against; a value that's already text (current
+        format) needs no resolution."""
+        if isinstance(value, int):
+            if 0 <= value < len(list_of_city):
+                return list_of_city[value][0]
+            return ""
+        return value or ""
+
+    def on_client_region_changed(self, index=None):
+        region = self.client_region.currentText()
+        self.client_province.blockSignals(True)
+        self.client_province.clear()
+        self.client_province.addItems(self.provinces_by_region.get(region, []))
+        self.client_province.setCurrentIndex(-1)
+        self.client_province.blockSignals(False)
+        self.client_city.blockSignals(True)
+        self.client_city.clear()
+        self.client_city.setCurrentIndex(-1)
+        self.client_city.blockSignals(False)
+        self.client_barangay.blockSignals(True)
+        self.client_barangay.clear()
+        self.client_barangay.setCurrentIndex(-1)
+        self.client_barangay.blockSignals(False)
+
+    def on_bene_region_changed(self, index=None):
+        region = self.bene_region.currentText()
+        self.bene_province.blockSignals(True)
+        self.bene_province.clear()
+        self.bene_province.addItems(self.provinces_by_region.get(region, []))
+        self.bene_province.setCurrentIndex(-1)
+        self.bene_province.blockSignals(False)
+        self.bene_city.blockSignals(True)
+        self.bene_city.clear()
+        self.bene_city.setCurrentIndex(-1)
+        self.bene_city.blockSignals(False)
+        self.bene_barangay.blockSignals(True)
+        self.bene_barangay.clear()
+        self.bene_barangay.setCurrentIndex(-1)
+        self.bene_barangay.blockSignals(False)
+
+    def on_client_province_changed(self, index=None):
+        province = self.client_province.currentText()
+        self.client_city.blockSignals(True)
+        self.client_city.clear()
+        self.client_city.addItems(self.cities_by_province.get(province, []))
+        self.client_city.setCurrentIndex(-1)
+        self.client_city.blockSignals(False)
+        self.client_barangay.blockSignals(True)
+        self.client_barangay.clear()
+        self.client_barangay.setCurrentIndex(-1)
+        self.client_barangay.blockSignals(False)
+
+    def on_bene_province_changed(self, index=None):
+        province = self.bene_province.currentText()
+        self.bene_city.blockSignals(True)
+        self.bene_city.clear()
+        self.bene_city.addItems(self.cities_by_province.get(province, []))
+        self.bene_city.setCurrentIndex(-1)
+        self.bene_city.blockSignals(False)
+        self.bene_barangay.blockSignals(True)
+        self.bene_barangay.clear()
+        self.bene_barangay.setCurrentIndex(-1)
+        self.bene_barangay.blockSignals(False)
+
+    def on_client_city_changed(self, index=None):
+        city = self.client_city.currentText()
+        self.client_barangay.blockSignals(True)
+        self.client_barangay.clear()
+        self.client_barangay.addItems(self.barangays_by_city.get(city, []))
+        self.client_barangay.setCurrentIndex(-1)
+        self.client_barangay.blockSignals(False)
+
+    def on_bene_city_changed(self, index=None):
+        city = self.bene_city.currentText()
+        self.bene_barangay.blockSignals(True)
+        self.bene_barangay.clear()
+        self.bene_barangay.addItems(self.barangays_by_city.get(city, []))
+        self.bene_barangay.setCurrentIndex(-1)
+        self.bene_barangay.blockSignals(False)
 
     def on_choice_change_client(self, index=None):
         bday = self.client_bday.date()
@@ -1001,7 +1316,12 @@ class MyFrame(QMainWindow):
         self.is_running = value
 
     def on_button_click(self, event=None):
-        self.on_save_data()
+        try:
+            self.on_save_data()
+        except Exception as e:
+            self.command_log.append(f"Error saving form data: {e}")
+            _log_crash(*sys.exc_info())
+            return
         if self.is_running:
             self.command_log.append("Task already running... Please wait.")
             return
@@ -1027,15 +1347,15 @@ class MyFrame(QMainWindow):
         set_date_value(self.encoded_date, d.get("encoded_date", "2000-01-01"))
         self.auto_next.setChecked(d.get("auto_next", False))
         self.auto_submit.setChecked(d.get("auto_submit", False))
-        self.thru_firstname.setChecked(d.get("thru_firstname", False))
         self.target_sector.setCurrentIndex(d.get("target_sector", 0))
         self.financial_assist.setCurrentIndex(d.get("financial_assist", 0))
         self.mode_release.setCurrentIndex(d.get("mode_release", 0))
         self.amount.setText(d.get("amount", ""))
         self.fund_source.setCurrentIndex(d.get("fund_source", 0))
-        self.sw_lname.setText(d.get("sw_lname", ""))
-        self.sw_fname.setText(d.get("sw_fname", ""))
-        self.sw_mname.setText(d.get("sw_mname", ""))
+        try:
+            self.social_worker.setCurrentIndex(self.social_worker_choices.index(d.get("sw_full_name", "")))
+        except ValueError:
+            self.social_worker.setCurrentIndex(-1)
         set_date_value(self.interview_date, d.get("interview_date", "2000-01-01"))
         self.client_relationship.setCurrentIndex(d.get("client_relationship", 0))
         self.client_lastname.setText(d.get("client_lastname", ""))
@@ -1048,8 +1368,10 @@ class MyFrame(QMainWindow):
         self.client_contact_no.setText(d.get("client_contact_no", ""))
         self.client_civil_status.setCurrentIndex(d.get("client_civil_status", 0))
         self.client_house_street.setText(d.get("client_house_street", ""))
-        self.client_barangay.setText(d.get("client_barangay", ""))
-        self.client_city.setCurrentIndex(d.get("client_city", 0))
+        self.client_region.setCurrentText(d.get("client_region", self.region_options[0] if self.region_options else ""))
+        self.client_province.setCurrentText(d.get("client_province", ""))
+        self.client_city.setCurrentText(self._resolve_pickle_city(d.get("client_city", "")))
+        self.client_barangay.setCurrentText(d.get("client_barangay", ""))
         self.bene_relationship.setCurrentIndex(d.get("bene_relationship", 0))
         self.bene_lastname.setText(d.get("bene_lastname", ""))
         self.bene_firstname.setText(d.get("bene_firstname", ""))
@@ -1061,8 +1383,10 @@ class MyFrame(QMainWindow):
         self.bene_contact_no.setText(d.get("bene_contact_no", ""))
         self.bene_civil_status.setCurrentIndex(d.get("bene_civil_status", 0))
         self.bene_house_street.setText(d.get("bene_house_street", ""))
-        self.bene_barangay.setText(d.get("bene_barangay", ""))
-        self.bene_city.setCurrentIndex(d.get("bene_city", 0))
+        self.bene_region.setCurrentText(d.get("bene_region", self.region_options[0] if self.region_options else ""))
+        self.bene_province.setCurrentText(d.get("bene_province", ""))
+        self.bene_city.setCurrentText(self._resolve_pickle_city(d.get("bene_city", "")))
+        self.bene_barangay.setCurrentText(d.get("bene_barangay", ""))
         self.has_beneficiary.setChecked(d.get("has_beneficiary", False))
         self.cb_encoded.setChecked(d.get("cb_encoded", False))
         self.auto_finish.setChecked(d.get("auto_finish", False))
@@ -1076,15 +1400,12 @@ class MyFrame(QMainWindow):
             "encoded_date": get_date_value(self.encoded_date),
             "auto_next": self.auto_next.isChecked(),
             "auto_submit": self.auto_submit.isChecked(),
-            "thru_firstname": self.thru_firstname.isChecked(),
             "target_sector": self.target_sector.currentIndex(),
             "financial_assist": self.financial_assist.currentIndex(),
             "mode_release": self.mode_release.currentIndex(),
             "amount": self.amount.text(),
             "fund_source": self.fund_source.currentIndex(),
-            "sw_lname": self.sw_lname.text(),
-            "sw_fname": self.sw_fname.text(),
-            "sw_mname": self.sw_mname.text(),
+            "sw_full_name": self.social_worker.currentText(),
             "interview_date": get_date_value(self.interview_date),
             "client_relationship": self.client_relationship.currentIndex(),
             "client_lastname": self.client_lastname.text(),
@@ -1097,8 +1418,10 @@ class MyFrame(QMainWindow):
             "client_contact_no": self.client_contact_no.text(),
             "client_civil_status": self.client_civil_status.currentIndex(),
             "client_house_street": self.client_house_street.text(),
-            "client_barangay": self.client_barangay.text(),
-            "client_city": self.client_city.currentIndex(),
+            "client_region": self.client_region.currentText(),
+            "client_province": self.client_province.currentText(),
+            "client_barangay": self.client_barangay.currentText(),
+            "client_city": self.client_city.currentText(),
             "bene_relationship": self.bene_relationship.currentIndex(),
             "bene_lastname": self.bene_lastname.text(),
             "bene_firstname": self.bene_firstname.text(),
@@ -1110,8 +1433,10 @@ class MyFrame(QMainWindow):
             "bene_contact_no": self.bene_contact_no.text(),
             "bene_civil_status": self.bene_civil_status.currentIndex(),
             "bene_house_street": self.bene_house_street.text(),
-            "bene_barangay": self.bene_barangay.text(),
-            "bene_city": self.bene_city.currentIndex(),
+            "bene_region": self.bene_region.currentText(),
+            "bene_province": self.bene_province.currentText(),
+            "bene_barangay": self.bene_barangay.currentText(),
+            "bene_city": self.bene_city.currentText(),
             "has_beneficiary": self.has_beneficiary.isChecked(),
             "cb_encoded": self.cb_encoded.isChecked(),
             "auto_finish": self.auto_finish.isChecked(),
@@ -1123,12 +1448,14 @@ class MyFrame(QMainWindow):
     def on_button_clear_all(self, event=None):
         for w in [self.client_lastname, self.client_firstname, self.client_middlename,
                   self.client_contact_no, self.client_age, self.client_house_street,
-                  self.client_barangay, self.bene_lastname, self.bene_firstname,
+                  self.bene_lastname, self.bene_firstname,
                   self.bene_middlename, self.bene_contact_no, self.bene_age,
-                  self.bene_house_street, self.bene_barangay]:
+                  self.bene_house_street]:
             w.setText("")
         for w in [self.client_gender, self.client_civil_status, self.client_city,
-                  self.bene_gender, self.bene_civil_status, self.bene_city]:
+                  self.bene_gender, self.bene_civil_status, self.bene_city,
+                  self.client_barangay, self.bene_barangay,
+                  self.client_province, self.bene_province]:
             w.setCurrentIndex(-1)
         self.command_log.append("All fields have been cleared.")
 
@@ -1142,7 +1469,6 @@ class MyFrame(QMainWindow):
         # assistance info
         data["auto_next"] = self.auto_next.isChecked()
         data["auto_submit"] = self.auto_submit.isChecked()
-        data["thru_firstname"] = self.thru_firstname.isChecked()
         data["target_sector"] = self.target_sector.currentIndex()
         data["financial_assist"] = self.financial_assist.currentIndex()
 
@@ -1150,9 +1476,7 @@ class MyFrame(QMainWindow):
 
         data["amount"] = self.amount.text()
         data["fund_source"] = self.fund_source.currentIndex()
-        data["sw_lname"] = self.sw_lname.text()
-        data["sw_fname"] = self.sw_fname.text()
-        data["sw_mname"] = self.sw_mname.text()
+        data["sw_full_name"] = self.social_worker.currentText()
         data["interview_date"] = get_date_value(self.interview_date)
 
         # client
@@ -1171,8 +1495,10 @@ class MyFrame(QMainWindow):
         data["client_civil_status"] = self.client_civil_status.currentIndex()
 
         data["client_house_street"] = self.client_house_street.text()
-        data["client_barangay"] = self.client_barangay.text()
-        data["client_city"] = self.client_city.currentIndex()
+        data["client_region"] = self.client_region.currentText()
+        data["client_province"] = self.client_province.currentText()
+        data["client_barangay"] = self.client_barangay.currentText()
+        data["client_city"] = self.client_city.currentText()
 
         # Bene
         data["bene_relationship"] = self.bene_relationship.currentIndex()
@@ -1190,8 +1516,10 @@ class MyFrame(QMainWindow):
         data["bene_civil_status"] = self.bene_civil_status.currentIndex()
 
         data["bene_house_street"] = self.bene_house_street.text()
-        data["bene_barangay"] = self.bene_barangay.text()
-        data["bene_city"] = self.bene_city.currentIndex()
+        data["bene_region"] = self.bene_region.currentText()
+        data["bene_province"] = self.bene_province.currentText()
+        data["bene_barangay"] = self.bene_barangay.currentText()
+        data["bene_city"] = self.bene_city.currentText()
 
         data["has_beneficiary"] = self.has_beneficiary.isChecked()
         data["cb_encoded"] = self.cb_encoded.isChecked()
@@ -1382,9 +1710,15 @@ class MyFrame(QMainWindow):
 
                     self.setTextField(driver, "cl_pcn", "0")
 
+                    self.setDropDown(driver, "select2-cl_typeid-container", "N/A")
+
+                    self.setTextField(driver, "cl_id_number", "0")
+                    
                     self.setTextField(driver, "queue_no", "0")
 
-                    self.setDropDown(driver, "select2-mode_of_admission-container", self.mode_of_admission.currentText())
+                    mode_of_admission_caption = self.mode_of_admission.currentText()
+                    self.setDropDown(driver, "select2-mode_of_admission-container",
+                                     self.mode_of_admission_map.get(mode_of_admission_caption, mode_of_admission_caption))
                     self.setDropDown(driver, "select2-cl_assisted_through-container", "Onsite")
                     self.setDropDown(driver, "select2-cl_typeid-container", "N/A")
                     self.setDropDown(driver, "select2-cl_referring_party-container", "Default Default Default")
@@ -1394,8 +1728,12 @@ class MyFrame(QMainWindow):
                     else:
                         self.setDropDown(driver, "select2-is_Self-container", "No")
 
-                    self.setDropDown(driver, "select2-cl_category-container", self.target_sector.currentText())
-                    self.setDropDown(driver, "select2-cl_sub_category-container", "NONE OF THE ABOVE")
+                    self.setDropDown(driver, "select2-cl_category-container",
+                                     self.target_sector_website_map.get(self.target_sector.currentText(), self.target_sector.currentText()))
+                    self.setDropDown(
+                        driver, "select2-cl_sub_category-container",
+                        self.sub_category_website_map.get(self.sub_category.currentText(), self.sub_category.currentText()),
+                    )
 
                     self.setTextField(driver, "lname", self.client_lastname.text())
                     self.setTextField(driver, "fname", self.client_firstname.text())
@@ -1406,7 +1744,7 @@ class MyFrame(QMainWindow):
 
                     self.setDate(driver, "birthdate", self.client_bday.date())
 
-                    self.setDropDown(driver, "select2-sex-container", self.client_gender.currentText())
+                    self.setDropDown(driver, "select2-sex-container", self.gender_website_map.get(self.client_gender.currentText(), self.client_gender.currentText()))
 
                     client_contact_value = self.client_contact_no.text()
                     if client_contact_value == "" :
@@ -1415,40 +1753,47 @@ class MyFrame(QMainWindow):
                     self.setTextField(driver, "contact_no", client_contact_value)
 
                     relationship_caption = self.client_relationship.currentText()
-                    relationship_name = self.relationship_data_map[relationship_caption]
 
-                    self.setDropDown(driver, "select2-relationship_bene-container", relationship_caption)
+                    self.setDropDown(
+                        driver, "select2-relationship_bene-container",
+                        self.relationship_website_map.get(relationship_caption, relationship_caption),
+                    )
 
                     civil_status_caption = self.client_civil_status.currentText()
-                    civil_status_name = self.civil_status_data_map[civil_status_caption]
+                    civil_status_name = self.civil_status_website_map[civil_status_caption]
 
                     self.setDropDown(driver, "select2-civil_status-container", civil_status_name)
 
                     self.setTextField(driver, "purok_street", self.client_house_street.text())
 
-                    self.setDropDown(driver, "select2-region-container", "NCR [National Capital Region]")
+                    client_city_lookup = self._city_lookup(self.client_city.currentText())
+                    self.setDropDown(driver, "select2-region-container", client_city_lookup["region_website"])
 
-
-                    districtNCR = district_city.get(self.client_city.currentText(), "NCR THIRD DISTRICT")
-
-                    self.setDropDown(driver, "select2-province-container", districtNCR)
+                    self.setDropDown(
+                        driver, "select2-province-container",
+                        self.province_website_map.get(self.client_province.currentText(), self.client_province.currentText()),
+                    )
 
                     if self.client_city.currentText() == "NONE OF THE ABOVE":
                         self.stop_requested = True
                         city_value = "NONE OF THE ABOVE"
-                    elif self.client_city.currentText() == "CITY OF CALOOCAN":
-                        city_value = "KALOOKAN CITY"
-                    elif self.client_city.currentText() == "CITY OF QUEZON CITY":
-                        city_value = "QUEZON CITY"
                     else:
-                        city_value = self.client_city.currentText()
+                        city_value = self.city_website_map.get(self.client_city.currentText(), self.client_city.currentText())
                     self.setDropDown(driver, "select2-city_muni-container", city_value)
 
-                    self.setDropDown(driver, "select2-barangay-container", self.client_barangay.text())
+                    self.setDropDown(
+                        driver, "select2-barangay-container",
+                        self.barangay_website_map.get(
+                            (self.client_city.currentText(), self.client_barangay.currentText()),
+                            self.client_barangay.currentText(),
+                        ),
+                    )
 
                     self.setDropDown(driver, "select2-occupation-container", "NONE OF THE ABOVE")
 
                     self.setTextField(driver, "salary", "0")
+
+                    self.setTextField(driver, "fam_members", "0")
 
                     if self.auto_next.isChecked() :
                         self.clickNextButton(driver, "Next")
@@ -1462,9 +1807,10 @@ class MyFrame(QMainWindow):
                     if self.has_beneficiary.isChecked():
                         self.selectCheckBox(driver, "uniform-same_add_client")
 
-                        self.setDropDown(driver, "select2-b_sex-container", self.bene_gender.currentText())
+                        self.setDropDown(driver, "select2-b_sex-container", self.gender_website_map.get(self.bene_gender.currentText(), self.bene_gender.currentText()))
+                        bene_civil_status_caption = self.bene_civil_status.currentText()
                         self.setDropDown(driver, "select2-b_civil_status-container",
-                                         self.bene_civil_status.currentText())
+                                         self.civil_status_website_map.get(bene_civil_status_caption, bene_civil_status_caption))
                         self.setDropDown(driver, "select2-b_referring_party-container", "Default Default Default")
 
                         self.setDate(driver, "b_birthdate", self.bene_bday.date())
@@ -1474,21 +1820,28 @@ class MyFrame(QMainWindow):
                         self.setTextField(driver, "b_mname", self.bene_middlename.text())
                         self.setTextField(driver, "b_xname", self.bene_ext.text())
 
-                        self.setDropDown(driver, "select2-b_region-container", "NCR [National Capital Region]")
+                        bene_city_lookup = self._city_lookup(self.bene_city.currentText())
+                        self.setDropDown(driver, "select2-b_region-container", bene_city_lookup["region_website"])
 
-                        districtNCR = district_city.get(self.client_city.currentText(), "NCR THIRD DISTRICT")
-                        self.setDropDown(driver, "select2-b_province-container", districtNCR)
+                        self.setDropDown(
+                            driver, "select2-b_province-container",
+                            self.province_website_map.get(self.bene_province.currentText(), self.bene_province.currentText()),
+                        )
 
-                        if self.client_city.currentText() == "NONE OF THE ABOVE":
+                        if self.bene_city.currentText() == "NONE OF THE ABOVE":
                             self.stop_requested = True
                             city_value = "NONE OF THE ABOVE"
-                        elif self.bene_city.currentText() == "CITY OF CALOOCAN":
-                            city_value = "KALOOKAN CITY"
                         else:
-                            city_value = self.client_city.currentText()
+                            city_value = self.city_website_map.get(self.bene_city.currentText(), self.bene_city.currentText())
                         self.setDropDown(driver, "select2-b_city_muni-container", city_value)
 
-                        self.setDropDown(driver, "select2-b_barangay-container", self.bene_barangay.text())
+                        self.setDropDown(
+                            driver, "select2-b_barangay-container",
+                            self.barangay_website_map.get(
+                                (self.bene_city.currentText(), self.bene_barangay.currentText()),
+                                self.bene_barangay.currentText(),
+                            ),
+                        )
 
                         self.setTextField(driver, "b_purok_street", self.bene_house_street.text())
                         self.setTextField(driver, "b_contact_no", self.bene_contact_no.text())
@@ -1501,8 +1854,12 @@ class MyFrame(QMainWindow):
                         return None
                     return None
                 case "assessment":
-                    self.setDropDown(driver, "select2-bene_category-container", self.target_sector.currentText())
-                    self.setDropDown(driver, "select2-bene_sub_category-container", "NONE OF THE ABOVE")
+                    self.setDropDown(driver, "select2-bene_category-container",
+                                     self.target_sector_website_map.get(self.target_sector.currentText(), self.target_sector.currentText()))
+                    self.setDropDown(
+                        driver, "select2-bene_sub_category-container",
+                        self.sub_category_website_map.get(self.sub_category.currentText(), self.sub_category.currentText()),
+                    )
 
                     value_string = ""
                     if self.client_gender.currentText().lower() == "male":
@@ -1548,12 +1905,14 @@ class MyFrame(QMainWindow):
                     self.setDropDown(driver, "select2-FA2type_financial_assistance-container", assistance_value)
 
                     # need testing
-                    mode = self.mode_release.currentText().title()
+                    mode_release_caption = self.mode_release.currentText()
+                    mode = self.mode_release_website_map.get(mode_release_caption, mode_release_caption).title()
                     self.setDropDown(driver, "select2-FA2mode_of_asssitance}-container", mode)
 
                     fund_source_caption = self.fund_source.currentText()
 
-                    self.setDropDown(driver, "select2-FA2fund_source-container", fund_source_caption)
+                    self.setDropDown(driver, "select2-FA2fund_source-container",
+                                     self.fund_source_website_map.get(fund_source_caption, fund_source_caption))
 
                     self.setTextField(driver, "FA[2][purpose]", purpose_value)
                     self.setTextField(driver, "FA[2][amount_of_assistance]", self.amount.text())
@@ -1596,21 +1955,15 @@ class MyFrame(QMainWindow):
                         return None
                     return None
                 case "approver":
-                    if self.thru_firstname.isChecked():
-                        if self.sw_mname.text() == "" :
-                            sw_full_name = f'{self.sw_fname.text()} {self.sw_lname.text()}'
-                        else:
-                            sw_full_name = f'{self.sw_fname.text()} {self.sw_mname.text()} {self.sw_lname.text()}'
-                    else:
-                        sw_full_name = f'{self.sw_lname.text()} {self.sw_fname.text()} {self.sw_mname.text()}'
-
-                    self.setDropDown(driver, "select2-assessed_by-container", sw_full_name)
+                    worker = self._selected_worker()
+                    website_value = worker[3] if worker else ""
+                    self.setDropDown(driver, "select2-assessed_by-container", website_value)
 
 
                     selected_index = self.approved_by.currentIndex()
                     if selected_index != -1:
                         selected_key = self.approved_by.currentText()
-                        selected_value = approved_by_list[selected_key]
+                        selected_value = self.approved_by_website_map[selected_key]
                         self.setDropDown(driver, "select2-approved_by-container", selected_value)
 
                     self.setDropDown(driver, "select2-status-container", "Approved")
@@ -1625,9 +1978,10 @@ class MyFrame(QMainWindow):
             return None
 
     def on_fill_crims_offline(self, driver):
-        region = "NCR [National Capital Region]"
+        offline_city_lookup = self._city_lookup(self.client_city.currentText())
+        region = self.region_gform_map.get(self.client_region.currentText(), self.client_region.currentText())
 
-        province = district_city.get(self.client_city.currentText(), "NCR THIRD DISTRICT")
+        province = self.province_gform_map.get(self.client_province.currentText(), self.client_province.currentText())
 
         gformTitle = self.getGFormTitle(driver)
 
@@ -1641,10 +1995,10 @@ class MyFrame(QMainWindow):
             selected_index = self.approved_by.currentIndex()
             if selected_index != -1:
                 selected_key = self.approved_by.currentText()
-                selected_value = approved_by_list[selected_key]
-                self.setGFormRadioButton(driver, "", selected_key)
+                selected_value = self.approved_by_gform_map[selected_key]
+                self.setGFormRadioButton(driver, "", selected_value)
 
-            self.setGFormRadioButton(driver, "REGION ASSESS", "NCR (National Capital Region)")
+            self.setGFormRadioButton(driver, "REGION ASSESS", offline_city_lookup["region_gform"])
             self.setGFormRadioButton(driver, "PAYEE", "N/A")
 
             client_contact_value = self.client_contact_no.text()
@@ -1684,14 +2038,16 @@ class MyFrame(QMainWindow):
 
                 self.setGFormRadioButtonOthers(driver, "AGE", self.bene_age.text())
                 self.setGFormRadioButton(driver, "BENEFICIARY CATEGORY", "N/A")
-                self.setGFormRadioButton(driver, "SEX", self.bene_gender.currentText())
-                self.setGFormRadioButton(driver, "CIVIL STATUS", self.bene_civil_status.currentText())
+                self.setGFormRadioButton(driver, "SEX", self.gender_gform_map.get(self.bene_gender.currentText(), self.bene_gender.currentText()))
+                bene_civil_status_caption = self.bene_civil_status.currentText()
+                self.setGFormRadioButton(driver, "CIVIL STATUS", self.civil_status_gform_map.get(bene_civil_status_caption, bene_civil_status_caption))
 
                 self.setGFormDate(driver, "i50", self.bene_bday.date())
 
             self.setGFormTextField(driver, "i46 i47", date_str)
 
-            mode_of_release_string = self.mode_release.currentText()
+            mode_release_caption = self.mode_release.currentText()
+            mode_of_release_string = self.mode_release_gform_map.get(mode_release_caption, mode_release_caption)
             self.setGFormRadioButton(driver, "MODE OF RELEASE", mode_of_release_string)
             self.setGFormRadioButton(driver, "DATE OF RELEASE", "2025")
             # i150 - INTERVIEW
@@ -1699,17 +2055,14 @@ class MyFrame(QMainWindow):
             self.setGFormDate(driver, "i150", self.interview_date.date())
             self.setGFormDate(driver, "i156", self.interview_date.date())
 
-            sw_lname_value = string.capwords(self.sw_lname.text())
-            sw_fname_value = string.capwords(self.sw_fname.text())
-            sw_mname_value = string.capwords(self.sw_mname.text())
-            sw_mname_initial_value = sw_mname_value[0].upper() if sw_mname_value else ""
-            sw_full_name = f'{sw_lname_value}, {sw_fname_value} {sw_mname_initial_value}.'
-            self.setGFormDropDown(driver, "i157 i160", sw_full_name)
+            worker = self._selected_worker()
+            gform_value = worker[2] if worker else ""
+            self.setGFormDropDown(driver, "i157 i160", gform_value)
 
             if self.auto_next.isChecked():
                 self.clickGFormButton(driver, "Next")
         elif gformTitle == "barangay and district":
-            self.setGFormTextField(driver, "i2 i3", self.client_barangay.text())
+            self.setGFormTextField(driver, "i2 i3", self.client_barangay.currentText().upper())
             self.setGFormDropDown(driver, "i6 i9", "I")
 
             self.setGFormTextField(driver, "i22 i23", self.client_lastname.text())
@@ -1724,32 +2077,39 @@ class MyFrame(QMainWindow):
                 client_ext_value = "N/A"
             self.setGFormDropDown(driver, "i26 i29", client_ext_value.lower())  # extension name
 
-            self.setGFormDropDown(driver, "i31 i34", self.client_gender.currentText().upper())  # sex
+            gender_value = self.gender_gform_map.get(self.client_gender.currentText(), self.client_gender.currentText())
+            self.setGFormDropDown(driver, "i31 i34", gender_value.upper())  # sex
 
             civil_status_caption = self.client_civil_status.currentText()
-            civil_status_name = self.civil_status_data_map[civil_status_caption]
+            civil_status_name = self.civil_status_gform_map[civil_status_caption]
 
-            self.setGFormRadioButton(driver, "CIVIL STATUS", civil_status_caption)
+            self.setGFormRadioButton(driver, "CIVIL STATUS", civil_status_name)
 
             self.setGFormDate(driver, "i61", self.client_bday.date())
             self.setGFormTextField(driver, "i63 i64", self.client_age.text())
 
-            self.setGFormRadioButton(driver, "MODE OF ADMISSION", "WALK-IN")
+            mode_of_admission_caption = self.mode_of_admission.currentText()
+            self.setGFormRadioButton(driver, "MODE OF ADMISSION",
+                                     self.mode_of_admission_map.get(mode_of_admission_caption, mode_of_admission_caption))
 
             self.setGFormTextField(driver, "i96 i97", self.amount.text())
 
             fund_source_caption = self.fund_source.currentText()
-            fund_source_name = self.fund_source_data_map[fund_source_caption]
+            fund_source_name = self.fund_source_gform_map[fund_source_caption]
 
             self.setGFormRadioButton(driver, "FUND SOURCE", fund_source_name)
 
-            sector_value = self.target_sector.currentText()
-            if sector_value.lower() == "senior citizens" :
+            sector_choice = self.target_sector.currentText()
+            sector_value = self.target_sector_gform_map.get(sector_choice, sector_choice)
+            if sector_choice.lower() == "senior citizens" :
                 sector_value = "senior citizens (no subcategories)"
             #     SENIOR CITIZENS (no subcategories)
             self.setGFormRadioButton(driver, "CLIENT CATEGORY", sector_value)
 
-            self.setGFormRadioButton(driver, "CLIENT SUB-CATEGORY", "Indigenous People")
+            self.setGFormRadioButton(
+                driver, "CLIENT SUB-CATEGORY",
+                self.sub_category_gform_map.get(self.sub_category.currentText(), self.sub_category.currentText()),
+            )
             # "Medical", "Burial", "Transportation", "Cash Support", "Food Subsidy"
             match self.financial_assist.currentText().lower():
                 case "medical":
@@ -1776,7 +2136,7 @@ class MyFrame(QMainWindow):
             self.setGFormRadioButton(driver, "SALARY", "0")
 
             relationship_caption = self.client_relationship.currentText()
-            relationship_name = self.relationship_data_map[relationship_caption]
+            relationship_name = self.relationship_gform_map[relationship_caption]
 
             self.setGFormRadioButton(driver, "RELATIONSHIP TO BENEFICIARY", relationship_name)
             if self.auto_next.isChecked():
@@ -1785,7 +2145,8 @@ class MyFrame(QMainWindow):
             if self.client_city.currentText() == "NONE OF THE ABOVE":
                 self.stop_requested = True
             else:
-                self.setGFormDropDown(driver, "i1 i4", self.client_city.currentText())
+                city_gform_value = self._city_lookup(self.client_city.currentText())["city_gform"]
+                self.setGFormDropDown(driver, "i1 i4", city_gform_value)
                 if self.auto_next.isChecked():
                     self.clickGFormButton(driver, "Next")
         elif is_similar(gformTitle, region.lower()):
@@ -1798,7 +2159,10 @@ class MyFrame(QMainWindow):
             self.setGFormTextField(driver, "i15 i16", self.encoder_name.text())
 
             self.selectSingleItemFirstOption(driver)
-            self.setGFormDropDown(driver, "i35 i38", region)
+            self.setGFormDropDown(
+                driver, "i35 i38",
+                self.region_gform_map.get(self.client_region.currentText(), self.client_region.currentText()),
+            )
             if self.auto_next.isChecked():
                 self.clickGFormButton(driver, "Next")
 
@@ -1816,8 +2180,9 @@ class MyFrame(QMainWindow):
 
         self.setGFormTextField(driver, "i34 i35", self.amount.text())
 
-        sw_full_name = f'{self.sw_fname.text()} {self.sw_mname.text()} {self.sw_lname.text()}'
-        self.setGFormTextField(driver, "i39 i40", sw_full_name)
+        worker = self._selected_worker()
+        gform_value = worker[2] if worker else ""
+        self.setGFormTextField(driver, "i39 i40", gform_value)
 
         self.setGFormAssistance(driver)
 
@@ -2350,12 +2715,13 @@ class MyFrame(QMainWindow):
     def same_address_event(self, state=None):
         if self.same_address.isChecked():
             self.bene_house_street.setText(self.client_house_street.text())
-            self.bene_barangay.setText(self.client_barangay.text())
-            self.bene_city.setCurrentIndex(self.client_city.currentIndex())
+            self.bene_region.setCurrentText(self.client_region.currentText())
+            self.bene_province.setCurrentText(self.client_province.currentText())
+            self.bene_city.setCurrentText(self.client_city.currentText())
+            self.bene_barangay.setCurrentText(self.client_barangay.currentText())
         else:
             self.bene_house_street.setText("")
-            self.bene_barangay.setText("")
-            self.bene_city.setCurrentIndex(-1)
+            self.bene_province.setCurrentIndex(-1)
 
     def same_contact_event(self, state=None):
         if self.same_contact.isChecked():
@@ -2365,12 +2731,12 @@ class MyFrame(QMainWindow):
         if not self.has_beneficiary.isChecked():
             for w in [self.bene_lastname, self.bene_firstname, self.bene_middlename,
                       self.bene_age, self.bene_ext, self.bene_contact_no,
-                      self.bene_house_street, self.bene_barangay]:
+                      self.bene_house_street]:
                 w.setText("")
             self.bene_relationship.setCurrentIndex(-1)
             self.bene_gender.setCurrentIndex(-1)
             self.bene_civil_status.setCurrentIndex(-1)
-            self.bene_city.setCurrentIndex(-1)
+            self.bene_province.setCurrentIndex(-1)
         else:
             self.bene_relationship.setCurrentIndex(self.client_relationship.currentIndex())
 
@@ -2379,37 +2745,32 @@ class MyFrame(QMainWindow):
 
     def on_selection(self, index=None):
         name = self.client_civil_status.currentText()
-        caption = self.civil_status_data_map.get(name, "")
+        caption = self.civil_status_gform_map.get(name, "")
         print(f"Selected Caption: {caption} Name: {name}")
 
-    def on_selection_worker(self, index=None):
-        selected = self.social_worker.currentText()
-        if not selected:
-            return
-        name_parts = selected.split(",")
-        if len(name_parts) < 3:
-            return
-        fname, mname, lname = name_parts[0], name_parts[1], name_parts[2]
-        data_worker = get_worker_id(lname.strip(), fname.strip(), mname.strip())
-        if data_worker:
-            self.sw_lname.setText(data_worker[1])
-            self.sw_fname.setText(data_worker[2])
-            self.sw_mname.setText(data_worker[3])
-            self.thru_firstname.setChecked(bool(data_worker[4]))
+    def _selected_worker(self):
+        """Return (id, full_name, gform_value, website_value) for the currently selected social worker, or None."""
+        index = self.social_worker.currentIndex()
+        if 0 <= index < len(self.social_worker_list):
+            return self.social_worker_list[index]
+        return None
 
     def reload_choice_items(self):
         self.social_worker_list = get_all_workers()
         self.social_worker.clear()
-        self.social_worker_choices = [f"{fname}, {mname}, {lname}" for (_id, lname, fname, mname, _thru) in self.social_worker_list]
+        self.social_worker_choices = [full_name for (_id, full_name, _gform, _website) in self.social_worker_list]
         self.social_worker.addItems(self.social_worker_choices)
 
-    def on_sw_text_change(self, text):
-        typed = text.lower().strip()
-        for index, name in enumerate(self.social_worker_choices):
-            if name.lower().startswith(typed):
-                self.social_worker.setCurrentIndex(index)
-                self.on_selection_worker(index)
-                break
+    def on_social_worker_editing_finished(self):
+        """Unlike Barangay, Social Worker must reference a real worker record —
+        typing is only for locating an existing choice via the dropdown (which now
+        opens on click, same as Barangay). Any text that isn't an exact match to a
+        known choice once editing ends is discarded rather than saved."""
+        try:
+            index = self.social_worker_choices.index(self.social_worker.currentText())
+        except ValueError:
+            index = -1
+        self.social_worker.setCurrentIndex(index)
 
     def on_export(self, event=None):
         self.command_log.append("Exporting, please wait...")
@@ -2433,8 +2794,11 @@ class ActivationFrame(QDialog):
         self.on_activate_success = on_activate_success
         self.setWindowTitle("Activate App")
         self.setFixedSize(480, 230)
+        self.setStyleSheet(STYLESHEET)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(6)
 
         layout.addWidget(QLabel("Device Id:"))
         self.label_text = get_device_id()
@@ -2451,6 +2815,7 @@ class ActivationFrame(QDialog):
         layout.addWidget(self.key_input)
 
         activate_btn = QPushButton("Activate")
+        activate_btn.setObjectName("addBtn")
         activate_btn.clicked.connect(self._on_activate)
         layout.addWidget(activate_btn, alignment=Qt.AlignmentFlag.AlignCenter)
 
@@ -2478,6 +2843,7 @@ class ActivationFrame(QDialog):
 
 
 if __name__ == "__main__":
+    install_crash_logging()
     app = QApplication(sys.argv)
     init_db()
 

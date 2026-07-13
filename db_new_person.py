@@ -1,5 +1,7 @@
 import sqlite3
 
+from config import list_of_city, district_city, region_list
+
 DB_NAME = 'person-record.db'
 
 def init_db_person():
@@ -34,7 +36,9 @@ def init_db_person():
                 client_contact_no TEXT,
                 client_house_street TEXT,
                 client_barangay TEXT,
-                client_city INTEGER ,
+                client_city TEXT ,
+                client_region TEXT ,
+                client_province TEXT ,
 
                 bene_lastname TEXT ,
                 bene_firstname TEXT ,
@@ -49,7 +53,9 @@ def init_db_person():
                 bene_contact_no TEXT,
                 bene_house_street TEXT,
                 bene_barangay TEXT,
-                bene_city INTEGER ,
+                bene_city TEXT ,
+                bene_region TEXT ,
+                bene_province TEXT ,
 
                 has_beneficiary INTEGER  DEFAULT 0,
                 mode_release INTEGER DEFAULT 0,
@@ -58,6 +64,67 @@ def init_db_person():
                 encoded INTEGER  DEFAULT 0
             )
         ''')
+        conn.commit()
+    _migrate_person_address_columns()
+    _migrate_city_index_to_name()
+
+
+def _migrate_person_address_columns():
+    """Additive migration: adds client_region/client_province/bene_region/bene_province
+    (safe if already present), reusing the PRAGMA table_info idiom from db_config.py."""
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        c.execute("PRAGMA table_info(person)")
+        existing_columns = {row[1] for row in c.fetchall()}
+        for col in ("client_region", "client_province", "bene_region", "bene_province"):
+            if col not in existing_columns:
+                c.execute(f"ALTER TABLE person ADD COLUMN {col} TEXT")
+        conn.commit()
+
+
+def _migrate_city_index_to_name():
+    """One-time, idempotent backfill: client_city/bene_city used to store the City
+    combobox's currentIndex() (INTEGER). Now that Province filters which cities
+    appear, the same index can mean a different city depending on filter state, so
+    storage moves to the city NAME (TEXT). Converts any row still holding an
+    integer index (using the fixed list_of_city order that was in effect when the
+    index-based storage was written) to the matching name, and backfills
+    client_region/client_province/bene_region/bene_province for rows where those
+    columns are still unset, deriving them from the now-resolved city name.
+    Naturally idempotent: once a cell holds a non-integer city name, later runs
+    skip it.
+    """
+    def resolve_city(value):
+        if isinstance(value, int):
+            if 0 <= value < len(list_of_city):
+                return list_of_city[value][0]
+            return ""  # unset/out-of-range index (e.g. -1) -> no city selected
+        return value  # already text (already migrated, or never set)
+
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        c.execute("SELECT id, client_city, bene_city, client_province, bene_province FROM person")
+        rows = c.fetchall()
+        default_region = region_list[0][0]
+        for row_id, client_city, bene_city, client_province, bene_province in rows:
+            updates = {}
+
+            new_client_city = resolve_city(client_city)
+            new_bene_city = resolve_city(bene_city)
+            if new_client_city != client_city:
+                updates["client_city"] = new_client_city
+            if new_bene_city != bene_city:
+                updates["bene_city"] = new_bene_city
+            if not client_province and new_client_city:
+                updates["client_province"] = district_city.get(new_client_city, "NCR THIRD DISTRICT")
+                updates["client_region"] = default_region
+            if not bene_province and new_bene_city:
+                updates["bene_province"] = district_city.get(new_bene_city, "NCR THIRD DISTRICT")
+                updates["bene_region"] = default_region
+
+            if updates:
+                set_clause = ", ".join(f"{col} = ?" for col in updates)
+                c.execute(f"UPDATE person SET {set_clause} WHERE id = ?", (*updates.values(), row_id))
         conn.commit()
 
 def set_encoded(rowid, value):
@@ -141,9 +208,13 @@ def get_all_person_by_encoded(is_encoded):
                 has_beneficiary,
                 encoded,
                 target_sector_bene,
-                mode_release, 
+                mode_release,
                 approved_by,
-                sub_category 
+                sub_category,
+                client_region,
+                client_province,
+                bene_region,
+                bene_province
             FROM person WHERE encoded = ? ORDER BY id ASC
         """, (is_encoded,))
         return cursor.fetchall()
@@ -193,7 +264,11 @@ def insert_person(
         has_beneficiary,
         mode_release,
         approved_by,
-        sub_category
+        sub_category,
+        client_region,
+        client_province,
+        bene_region,
+        bene_province
 ):
     """Insert a person record into the database"""
     try:
@@ -244,15 +319,19 @@ def insert_person(
                         bene_barangay,
                         bene_city,
                         has_beneficiary,
-                        mode_release, 
+                        mode_release,
                         approved_by,
-                        sub_category 
+                        sub_category,
+                        client_region,
+                        client_province,
+                        bene_region,
+                        bene_province
                     ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
-                    ?);
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?);
                 """, (
                     encoder_name,
                     date_encoded,
@@ -293,8 +372,12 @@ def insert_person(
                     bene_city,
                     has_beneficiary,
                     mode_release,
-                    approved_by, 
-                    sub_category
+                    approved_by,
+                    sub_category,
+                    client_region,
+                    client_province,
+                    bene_region,
+                    bene_province
                 ))
                 return True
             else:
@@ -351,6 +434,11 @@ def update_person(
         mode_release,
         approved_by,
         sub_category,
+
+        client_region,
+        client_province,
+        bene_region,
+        bene_province,
 ):
     """Update a person record by rowid"""
     try:
@@ -401,7 +489,12 @@ def update_person(
                     has_beneficiary = ?,
                     mode_release = ?,
                     approved_by = ?,
-                    sub_category = ? 
+                    sub_category = ?,
+
+                    client_region = ?,
+                    client_province = ?,
+                    bene_region = ?,
+                    bene_province = ?
                 WHERE rowid = ?;
             """, (
                 encoder_name,
@@ -445,6 +538,10 @@ def update_person(
                 mode_release,
                 approved_by,
                 sub_category,
+                client_region,
+                client_province,
+                bene_region,
+                bene_province,
                 rowid
             ))
         return True

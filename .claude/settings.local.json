@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python assistance-form.py)",
+      "Read(//c/Users/raimond/AppData/Local/Programs/Python//**)",
+      "Bash(ls /c/Python*)",
+      "Read(//c/Users/raimond/**)",
+      "Bash(/c/Users/raimond/AppData/Local/Programs/Python/Python314/python.exe:*)",
+      "Bash(cmd.exe:*)",
+      "Bash(powershell.exe:*)",
+      "Bash(python assistance-form-new.py)",
+      "Bash(ls /c/Python*/python.exe)",
+      "Bash(ls /c/Users/raimond/AppData/Local/Programs/Python/*/python.exe)",
+      "Bash(cmd /c \"where python\")",
+      "Bash(python3 assistance-form-new.py)",
+      "Bash(cmd /c \"where python3\")",
+      "Bash(cmd /c \"where py\")",
+      "Bash(cmd /c \"py --version\")",
+      "Bash(powershell -Command \"Get-ChildItem 'C:\\\\Users\\\\raimond\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python314' -ErrorAction SilentlyContinue | Select-Object Name\")",
+      "Bash(py -3.14 -c \"from utilities import is_similar, get_date_value, set_date_value; print\\('OK'\\)\")"
+    ]
+  }
+}
