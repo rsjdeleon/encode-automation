@@ -11,8 +11,10 @@ import traceback
 from selenium.webdriver.common.alert import Alert
 from datetime import datetime
 from selenium import webdriver
-from selenium.common import NoSuchElementException
+from selenium.common import NoSuchElementException, TimeoutException
 from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QDialog, QVBoxLayout, QHBoxLayout,
@@ -23,46 +25,33 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QDate, Signal, QObject, QTimer
 from PySide6.QtGui import QColor, QFont, QCursor
 
-from widgets import AllCapsLineEdit, NoScrollComboBox, set_table_visible_rows, set_textedit_visible_rows
+from ui.widgets import AllCapsLineEdit, NoScrollComboBox, set_table_visible_rows, set_textedit_visible_rows
 
-from styles import STYLESHEET
+from ui.styles import STYLESHEET
 
-from utilities import is_similar
-from utilities import get_date_value
-from utilities import disable_mousewheel
-from utilities import set_date_value
+from core.utilities import is_similar
+from core.utilities import get_date_value
+from core.utilities import disable_mousewheel
+from core.utilities import set_date_value
 
-from db_new_person import init_db_person, DB_NAME
-from db_new_person import get_all_person_by_encoded
-from db_new_person import set_encoded
-from db_new_person import insert_person, update_person, delete_person_by_id
+from db.person_store import init_db_person, DB_NAME
+from db.person_store import get_all_person_by_encoded
+from db.person_store import set_encoded
+from db.person_store import insert_person, update_person, delete_person_by_id
 
-from db_worker import init_db_worker
-from db_worker import get_all_workers, get_worker_by_full_name
+from db.worker_store import init_db_worker
+from db.worker_store import get_all_workers, get_worker_by_full_name
 
-from db_config import init_db_config, seed_from_config_if_empty, backfill_city_regions
-from db_config import migrate_gender_to_pairs, migrate_target_sector_to_pairs
-from db_config import migrate_mode_of_release_to_pairs, migrate_financial_assistance_to_pairs
-from db_config import migrate_civil_status_to_pairs, migrate_fund_source_to_pairs
-from db_config import migrate_relationship_to_pairs, migrate_client_sub_category_to_pairs
-from db_config import migrate_target_sector_to_dual_pairs, migrate_approved_by_to_dual_pairs
-from db_config import migrate_gender_to_dual_pairs
-from db_config import migrate_civil_status_to_dual_pairs, migrate_fund_source_to_dual_pairs
-from db_config import migrate_mode_of_release_to_dual_pairs, migrate_financial_assistance_to_dual_pairs
-from db_config import migrate_relationship_to_dual_pairs, migrate_client_sub_category_to_dual_pairs
-from db_config import migrate_region_to_dual_pairs, migrate_province_region_link_to_id
-from db_config import migrate_city_province_link_to_id, migrate_province_to_dual_pairs
-from db_config import migrate_city_to_dual_pairs, migrate_barangay_to_dual_pairs
-from db_config import migrate_barangay_city_link_to_id
-from db_config import remove_approver_list
-from db_config import get_all_lists, get_items
+from db.config_store import init_db_config, seed_from_config_if_empty, run_startup_config_migrations
+from db.config_store import get_all_lists, get_items
 
-from config import mov_url
-from config import offline_url
-from config import website_url
-from config import list_of_city
+from core.config import mov_url
+from core.config import offline_url
+from core.config import website_url
+from core.config import list_of_city
+from core.paths import FORM_CACHE_FILE_PATH, CRASH_LOG_FILE_PATH
 
-from license import is_trial_valid, activate_trial, get_device_id
+from core.license import is_trial_valid, activate_trial, get_device_id
 import winsound
 import keyboard
 
@@ -74,7 +63,7 @@ AllTextCtrl = QLineEdit
 def _log_crash(exc_type, exc_value, exc_tb):
     message = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
     try:
-        with open("crash.log", "a", encoding="utf-8") as f:
+        with open(CRASH_LOG_FILE_PATH, "a", encoding="utf-8") as f:
             f.write(f"\n--- {datetime.now().isoformat()} ---\n{message}")
     except Exception:
         pass
@@ -102,32 +91,7 @@ def init_db():
     init_db_worker()
     init_db_config()
     seed_from_config_if_empty()
-    backfill_city_regions()
-    migrate_gender_to_pairs()
-    migrate_target_sector_to_pairs()
-    migrate_mode_of_release_to_pairs()
-    migrate_financial_assistance_to_pairs()
-    migrate_civil_status_to_pairs()
-    migrate_fund_source_to_pairs()
-    migrate_relationship_to_pairs()
-    migrate_client_sub_category_to_pairs()
-    migrate_target_sector_to_dual_pairs()
-    migrate_approved_by_to_dual_pairs()
-    migrate_gender_to_dual_pairs()
-    migrate_civil_status_to_dual_pairs()
-    migrate_fund_source_to_dual_pairs()
-    migrate_mode_of_release_to_dual_pairs()
-    migrate_financial_assistance_to_dual_pairs()
-    migrate_relationship_to_dual_pairs()
-    migrate_client_sub_category_to_dual_pairs()
-    migrate_region_to_dual_pairs()
-    migrate_province_region_link_to_id()
-    migrate_city_province_link_to_id()
-    migrate_barangay_city_link_to_id()
-    migrate_province_to_dual_pairs()
-    migrate_city_to_dual_pairs()
-    migrate_barangay_to_dual_pairs()
-    remove_approver_list()
+    run_startup_config_migrations()
 
 def export_sqlite_to_csv(db_path, table_name, csv_path):
     """
@@ -429,17 +393,9 @@ class MyFrame(QMainWindow):
         self.is_auto_fill = False
         self.is_finished_refresh = False
 
-        self.city_config = self._load_city_config()
-        self.barangays_by_city = self._load_barangays_by_city()
-        self.barangay_website_map = self._load_barangay_website_map()
-        self.region_options = self._load_region_list()
-        self.region_gform_map = self._load_region_gform_map()
-        self.provinces_by_region = self._load_provinces_by_region()
-        self.province_gform_map = self._load_province_gform_map()
-        self.province_website_map = self._load_province_website_map()
-        self.province_options = [p for provinces in self.provinces_by_region.values() for p in provinces]
-        self.cities_by_province = self._load_cities_by_province()
-        self.city_website_map = {city: info["city_website"] for city, info in self.city_config.items()}
+        self._list_meta_by_key = {}
+        self._items_by_key = {}
+        self.reload_config_data()
 
         keyboard.add_hotkey('shift+enter', self.on_add_person)
 
@@ -983,12 +939,48 @@ class MyFrame(QMainWindow):
         scrollbar = self.command_log.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
-    def _get_list_rows(self, key):
-        """Return get_items() rows (id, col1, col2, extra, extra2) for the config list with this key, or []."""
+    def _reload_config_cache(self):
+        """Warm a per-session snapshot of config lists/items to avoid repeated
+        get_all_lists()/get_items() round-trips during UI initialization."""
+        self._list_meta_by_key = {}
+        self._items_by_key = {}
+
         for list_id, list_key, label, kind, col1_label, col2_label in get_all_lists():
-            if list_key == key:
-                return get_items(list_id)
-        return []
+            self._list_meta_by_key[list_key] = {
+                "list_id": list_id,
+                "label": label,
+                "kind": kind,
+                "col1_label": col1_label,
+                "col2_label": col2_label,
+            }
+            self._items_by_key[list_key] = get_items(list_id)
+
+    def invalidate_config_cache(self):
+        self._list_meta_by_key = {}
+        self._items_by_key = {}
+
+    def reload_config_data(self):
+        """Refresh cache and rebuild all config-driven in-memory maps.
+
+        This is the single invalidation/reload hook to call after any workflow
+        that changes config.db values while this window remains open.
+        """
+        self._reload_config_cache()
+        self.city_config = self._load_city_config()
+        self.barangays_by_city = self._load_barangays_by_city()
+        self.barangay_website_map = self._load_barangay_website_map()
+        self.region_options = self._load_region_list()
+        self.region_gform_map = self._load_region_gform_map()
+        self.provinces_by_region = self._load_provinces_by_region()
+        self.province_gform_map = self._load_province_gform_map()
+        self.province_website_map = self._load_province_website_map()
+        self.province_options = [p for provinces in self.provinces_by_region.values() for p in provinces]
+        self.cities_by_province = self._load_cities_by_province()
+        self.city_website_map = {city: info["city_website"] for city, info in self.city_config.items()}
+
+    def _get_list_rows(self, key):
+        """Return cached get_items() rows (id, col1, col2, extra, extra2) for a config list key."""
+        return self._items_by_key.get(key, [])
 
     def _load_city_config(self):
         """Build {city: {"province", "region_gform", "region_website", "city_gform",
@@ -998,145 +990,98 @@ class MyFrame(QMainWindow):
         every city row, so a renamed province/region doesn't silently orphan its cities.
         city_gform/city_website are the city's own values (e.g. "CITY OF CALOOCAN"'s
         website value is "KALOOKAN CITY")."""
-        region_by_id = {}
-        for list_id, key, label, kind, col1_label, col2_label in get_all_lists():
-            if key != "region_list":
-                continue
-            for item_id, region_label, region_gform, _extra, region_website in get_items(list_id):
-                region_by_id[str(item_id)] = {
-                    "gform": region_gform or region_label,
-                    "website": region_website or region_label,
-                }
-            break
+        region_by_id = {
+            str(item_id): {
+                "gform": region_gform or region_label,
+                "website": region_website or region_label,
+            }
+            for item_id, region_label, region_gform, _extra, region_website in self._get_list_rows("region_list")
+        }
 
-        province_by_id = {}
-        for list_id, key, label, kind, col1_label, col2_label in get_all_lists():
-            if key != "province_list":
-                continue
-            for item_id, province_label, _col2, region_id, _extra2 in get_items(list_id):
-                province_by_id[str(item_id)] = {"label": province_label, "region_id": region_id}
-            break
+        province_by_id = {
+            str(item_id): {"label": province_label, "region_id": region_id}
+            for item_id, province_label, _col2, region_id, _extra2 in self._get_list_rows("province_list")
+        }
 
         city_config = {}
-        for list_id, key, label, kind, col1_label, col2_label in get_all_lists():
-            if key != "list_of_city":
-                continue
-            for _item_id, city, city_gform, province_id, city_website in get_items(list_id):
-                province_info = province_by_id.get(province_id, {})
-                region_info = region_by_id.get(province_info.get("region_id"), {})
-                city_config[city] = {
-                    "province": province_info.get("label") or "NCR THIRD DISTRICT",
-                    "region_gform": region_info.get("gform") or "NCR (National Capital Region)",
-                    "region_website": region_info.get("website") or "NCR [National Capital Region]",
-                    "city_gform": city_gform or city,
-                    "city_website": city_website or city,
-                }
-            break
+        for _item_id, city, city_gform, province_id, city_website in self._get_list_rows("list_of_city"):
+            province_info = province_by_id.get(province_id, {})
+            region_info = region_by_id.get(province_info.get("region_id"), {})
+            city_config[city] = {
+                "province": province_info.get("label") or "NCR THIRD DISTRICT",
+                "region_gform": region_info.get("gform") or "NCR (National Capital Region)",
+                "region_website": region_info.get("website") or "NCR [National Capital Region]",
+                "city_gform": city_gform or city,
+                "city_website": city_website or city,
+            }
         return city_config
 
     def _load_barangays_by_city(self):
         """Build {city label: [barangay, ...]} from barangay_list config rows (extra
         column holds the linked city's config_items.id, not its label, so a renamed
         city doesn't silently orphan its barangays)."""
-        city_labels_by_id = {}
-        for list_id, key, label, kind, col1_label, col2_label in get_all_lists():
-            if key != "list_of_city":
-                continue
-            for item_id, city_label, _col2, _extra, _extra2 in get_items(list_id):
-                city_labels_by_id[str(item_id)] = city_label
-            break
+        city_labels_by_id = {
+            str(item_id): city_label
+            for item_id, city_label, _col2, _extra, _extra2 in self._get_list_rows("list_of_city")
+        }
 
         barangays_by_city = {}
-        for list_id, key, label, kind, col1_label, col2_label in get_all_lists():
-            if key != "barangay_list":
+        for _item_id, barangay, _col2, city_id, _extra2 in self._get_list_rows("barangay_list"):
+            city_label = city_labels_by_id.get(city_id)
+            if city_label is None:
                 continue
-            for _item_id, barangay, _col2, city_id, _extra2 in get_items(list_id):
-                city_label = city_labels_by_id.get(city_id)
-                if city_label is None:
-                    continue
-                barangays_by_city.setdefault(city_label, []).append(barangay)
-            break
+            barangays_by_city.setdefault(city_label, []).append(barangay)
         return barangays_by_city
 
     def _load_region_list(self):
         """Build [region, ...] from region_list config rows."""
-        for list_id, key, label, kind, col1_label, col2_label in get_all_lists():
-            if key != "region_list":
-                continue
-            return [col1 for _item_id, col1, _col2, _extra, _extra2 in get_items(list_id)]
-        return []
+        return [col1 for _item_id, col1, _col2, _extra, _extra2 in self._get_list_rows("region_list")]
 
     def _load_region_gform_map(self):
         """Build {region label: GForm value} from region_list config rows."""
-        for list_id, key, label, kind, col1_label, col2_label in get_all_lists():
-            if key != "region_list":
-                continue
-            return {col1: (col2 or col1) for _item_id, col1, col2, _extra, _extra2 in get_items(list_id)}
-        return {}
+        return {col1: (col2 or col1) for _item_id, col1, col2, _extra, _extra2 in self._get_list_rows("region_list")}
 
     def _load_province_gform_map(self):
         """Build {province label: GForm value} from province_list config rows."""
-        for list_id, key, label, kind, col1_label, col2_label in get_all_lists():
-            if key != "province_list":
-                continue
-            return {col1: (col2 or col1) for _item_id, col1, col2, _extra, _extra2 in get_items(list_id)}
-        return {}
+        return {col1: (col2 or col1) for _item_id, col1, col2, _extra, _extra2 in self._get_list_rows("province_list")}
 
     def _load_province_website_map(self):
         """Build {province label: Website Value} from province_list config rows."""
-        for list_id, key, label, kind, col1_label, col2_label in get_all_lists():
-            if key != "province_list":
-                continue
-            return {col1: (extra2 or col1) for _item_id, col1, _col2, _extra, extra2 in get_items(list_id)}
-        return {}
+        return {col1: (extra2 or col1) for _item_id, col1, _col2, _extra, extra2 in self._get_list_rows("province_list")}
 
     def _load_barangay_website_map(self):
         """Build {(city label, barangay label): Website Value} from barangay_list
         config rows (extra column holds the linked city's config_items.id, not its
         label). Keyed by city too, not just barangay label, since barangay names
         repeat across different cities."""
-        city_labels_by_id = {}
-        for list_id, key, label, kind, col1_label, col2_label in get_all_lists():
-            if key != "list_of_city":
-                continue
-            for item_id, city_label, _col2, _extra, _extra2 in get_items(list_id):
-                city_labels_by_id[str(item_id)] = city_label
-            break
+        city_labels_by_id = {
+            str(item_id): city_label
+            for item_id, city_label, _col2, _extra, _extra2 in self._get_list_rows("list_of_city")
+        }
 
         barangay_website_map = {}
-        for list_id, key, label, kind, col1_label, col2_label in get_all_lists():
-            if key != "barangay_list":
+        for _item_id, barangay, _col2, city_id, extra2 in self._get_list_rows("barangay_list"):
+            city_label = city_labels_by_id.get(city_id)
+            if city_label is None:
                 continue
-            for _item_id, barangay, _col2, city_id, extra2 in get_items(list_id):
-                city_label = city_labels_by_id.get(city_id)
-                if city_label is None:
-                    continue
-                barangay_website_map[(city_label, barangay)] = extra2 or barangay
-            break
+            barangay_website_map[(city_label, barangay)] = extra2 or barangay
         return barangay_website_map
 
     def _load_provinces_by_region(self):
         """Build {region_label: [province, ...]} from province_list config rows
         (extra column holds the linked region's config_items.id, not its label,
         so a renamed region doesn't silently orphan its provinces)."""
-        region_labels_by_id = {}
-        for list_id, key, label, kind, col1_label, col2_label in get_all_lists():
-            if key != "region_list":
-                continue
-            for item_id, region_label, _col2, _extra, _extra2 in get_items(list_id):
-                region_labels_by_id[str(item_id)] = region_label
-            break
+        region_labels_by_id = {
+            str(item_id): region_label
+            for item_id, region_label, _col2, _extra, _extra2 in self._get_list_rows("region_list")
+        }
 
         provinces_by_region = {}
-        for list_id, key, label, kind, col1_label, col2_label in get_all_lists():
-            if key != "province_list":
+        for _item_id, province, _col2, region_id, _extra2 in self._get_list_rows("province_list"):
+            region_label = region_labels_by_id.get(region_id)
+            if region_label is None:
                 continue
-            for _item_id, province, _col2, region_id, _extra2 in get_items(list_id):
-                region_label = region_labels_by_id.get(region_id)
-                if region_label is None:
-                    continue
-                provinces_by_region.setdefault(region_label, []).append(province)
-            break
+            provinces_by_region.setdefault(region_label, []).append(province)
         return provinces_by_region
 
     def _load_cities_by_province(self):
@@ -1330,7 +1275,7 @@ class MyFrame(QMainWindow):
         threading.Thread(target=self.on_fill_up, daemon=True).start()
 
     def on_check_pickle(self):
-        file_path = "data-new.pkl"
+        file_path = FORM_CACHE_FILE_PATH
 
         # Check if the file exists
         if os.path.exists(file_path):
@@ -1339,7 +1284,7 @@ class MyFrame(QMainWindow):
             self.on_save_data()
 
     def on_load_data(self):
-        with open("data-new.pkl", "rb") as file:
+        with open(FORM_CACHE_FILE_PATH, "rb") as file:
             self.loaded_data = pickle.load(file)
         d = self.loaded_data
         self.mode_of_admission.setCurrentIndex(d.get("mode_of_admission", 1))
@@ -1442,7 +1387,7 @@ class MyFrame(QMainWindow):
             "auto_finish": self.auto_finish.isChecked(),
             "selected_id": self.encode_id.text(),
         }
-        with open("data-new.pkl", "wb") as file:
+        with open(FORM_CACHE_FILE_PATH, "wb") as file:
             pickle.dump(self.data, file)
 
     def on_button_clear_all(self, event=None):
@@ -1545,29 +1490,67 @@ class MyFrame(QMainWindow):
 
         self.command_log.append(f"Data saved successfully to {csv_file}")
 
+    def _connect_chrome_debugger(self, retries=3, base_delay=1.0):
+        """Attach to an existing Chrome debug session with bounded retries."""
+        last_error = None
+        for attempt in range(1, retries + 1):
+            try:
+                chrome_options = webdriver.ChromeOptions()
+                chrome_options.debugger_address = "localhost:9222"
+                return webdriver.Chrome(options=chrome_options)
+            except Exception as exc:
+                last_error = exc
+                self._sig_log.emit(f"Chrome attach failed (attempt {attempt}/{retries}): {exc}")
+                if attempt < retries:
+                    time.sleep(base_delay * attempt)
+
+        raise RuntimeError(f"Unable to attach to Chrome debugger on localhost:9222: {last_error}")
+
+    def _accept_alert_if_present(self, driver, timeout=2):
+        """Best-effort alert accept that does not block when no alert exists."""
+        try:
+            WebDriverWait(driver, timeout).until(EC.alert_is_present())
+            Alert(driver).accept()
+            self.command_log.append("Alert accepted.")
+            return True
+        except TimeoutException:
+            return False
+        except Exception as exc:
+            self.command_log.append(f"Alert handling failed: {exc}")
+            return False
+
     def on_refresh(self, event=None):
         if self.cb_website.isChecked() or self.cb_offline.isChecked() or self.cb_mov.isChecked():
-            chrome_options = webdriver.ChromeOptions()
-            chrome_options.debugger_address = "localhost:9222"
-            driver = webdriver.Chrome(options=chrome_options)
+            driver = None
+            try:
+                driver = self._connect_chrome_debugger()
+            except Exception as exc:
+                self.command_log.append(f"Cannot connect to Chrome debugger: {exc}")
+                return
 
-            if self.cb_mov.isChecked():
-                if self.switch_to_tab(driver, mov_url):
-                    self.clickAddButton(driver, "Submit another response")
-                else:
-                    self.command_log.append("URL not found in any open tab.")
-            if self.cb_offline.isChecked():
-                if self.switch_to_tab(driver, offline_url):
-                    self.clickAddButton(driver, "Submit another response")
-                else:
-                    self.command_log.append("URL not found in any open tab.")
-            if self.cb_website.isChecked():
-                if self.switch_to_tab(driver, website_url):
-                    self.clickAddButton(driver, "Home")
-                else:
-                    self.command_log.append("URL not found in any open tab.")
-            driver.quit()
-            self._sig_log.emit("Task completed!")
+            try:
+                if self.cb_mov.isChecked():
+                    if self.switch_to_tab(driver, mov_url):
+                        self.clickAddButton(driver, "Submit another response")
+                    else:
+                        self.command_log.append("URL not found in any open tab.")
+                if self.cb_offline.isChecked():
+                    if self.switch_to_tab(driver, offline_url):
+                        self.clickAddButton(driver, "Submit another response")
+                    else:
+                        self.command_log.append("URL not found in any open tab.")
+                if self.cb_website.isChecked():
+                    if self.switch_to_tab(driver, website_url):
+                        self.clickAddButton(driver, "Home")
+                    else:
+                        self.command_log.append("URL not found in any open tab.")
+                self._sig_log.emit("Task completed!")
+            finally:
+                if driver is not None:
+                    try:
+                        driver.quit()
+                    except Exception:
+                        pass
         else:
             self.command_log.append("Please select a checkbox(s).")
 
@@ -1586,40 +1569,47 @@ class MyFrame(QMainWindow):
         is_end_website = False
 
         if self.cb_website.isChecked() or self.cb_offline.isChecked() or self.cb_mov.isChecked():
+            try:
+                self.driver = self._connect_chrome_debugger()
 
-            # Attach to an existing Chrome session (Make sure Chrome is running with debugging mode)
-            chrome_options = webdriver.ChromeOptions()
-            chrome_options.debugger_address = "localhost:9222"  # Attach to existing Chrome session
+                # Get all currently open tabs
+                if self.cb_mov.isChecked():
+                    if self.switch_to_tab(self.driver, mov_url):
+                        is_end_mov = self.is_end_of_g_form(self.driver)
+                        if not is_end_mov :
+                            self.on_fill_crims_mov(self.driver)
+                    else:
+                        self.command_log.append("URL not found in any open tab.")
 
-            self.driver = webdriver.Chrome(options=chrome_options)  # Open Selenium with existing Chrome session
+                if self.cb_offline.isChecked():
+                    if self.switch_to_tab(self.driver, offline_url):
+                        is_end_offline = self.is_end_of_g_form(self.driver)
+                        if not is_end_offline:
+                            self.on_fill_crims_offline(self.driver)
+                    else:
+                        self.command_log.append("URL not found in any open tab.")
 
-            # Get all currently open tabs
-            if self.cb_mov.isChecked():
-                if self.switch_to_tab(self.driver, mov_url):
-                    is_end_mov = self.is_end_of_g_form(self.driver)
-                    if not is_end_mov :
-                        self.on_fill_crims_mov(self.driver)
-                else:
-                    self.command_log.append("URL not found in any open tab.")
+                if self.cb_website.isChecked():
+                    if self.switch_to_tab(self.driver, website_url):
+                        is_end_website = self.is_end_of_website(self.driver)
+                        if not is_end_website:
+                            self.on_fill_crims_website(self.driver)
+                    else:
+                        self.command_log.append("URL not found in any open tab.")
 
-            if self.cb_offline.isChecked():
-                if self.switch_to_tab(self.driver, offline_url):
-                    is_end_offline = self.is_end_of_g_form(self.driver)
-                    if not is_end_offline:
-                        self.on_fill_crims_offline(self.driver)
-                else:
-                    self.command_log.append("URL not found in any open tab.")
-
-            if self.cb_website.isChecked():
-                if self.switch_to_tab(self.driver, website_url):
-                    is_end_website = self.is_end_of_website(self.driver)
-                    if not is_end_website:
-                        self.on_fill_crims_website(self.driver)
-                else:
-                    self.command_log.append("URL not found in any open tab.")
-
-            self.driver.quit()
-            self._sig_log.emit("Task completed!")
+                self._sig_log.emit("Task completed!")
+            except Exception as exc:
+                self._sig_log.emit(f"Automation stopped: {exc}")
+                self.stop_requested = False
+                self._sig_set_running.emit(False)
+                return
+            finally:
+                if self.driver is not None:
+                    try:
+                        self.driver.quit()
+                    except Exception:
+                        pass
+                    self.driver = None
 
         else:
             self.command_log.append("Please select a checkbox(s).")
@@ -1917,40 +1907,12 @@ class MyFrame(QMainWindow):
                     self.setTextField(driver, "FA[2][purpose]", purpose_value)
                     self.setTextField(driver, "FA[2][amount_of_assistance]", self.amount.text())
 
-                    try:
-                        driver.implicitly_wait(10)
-                        # Switch to the alert (pop-up)
-                        alert = Alert(driver)
-
-                        # Accept the alert (click "OK")
-                        alert.accept()
-                        print("Alert accepted!")
-
-                    except:
-                        print("No alert present")
+                    self._accept_alert_if_present(driver)
 
                     if self.auto_next.isChecked() :
                         self.clickNextButton(driver, "Next")
-                        try:
-                            driver.implicitly_wait(10)
-                            # Switch to the alert (pop-up)
-                            alert = Alert(driver)
-
-                            # Accept the alert (click "OK")
-                            alert.accept()
-                            print("Alert accepted!")
-                        except:
-                            print("No alert present")
-                        try:
-                            driver.implicitly_wait(10)
-                            # Switch to the alert (pop-up)
-                            alert = Alert(driver)
-
-                            # Accept the alert (click "OK")
-                            alert.accept()
-                            print("Alert accepted!")
-                        except:
-                            print("No alert present")
+                        self._accept_alert_if_present(driver)
+                        self._accept_alert_if_present(driver)
                         self.clickNextButton(driver, "Next")
                         return None
                     return None
@@ -2253,7 +2215,9 @@ class MyFrame(QMainWindow):
                             option_text = option.get_attribute("aria-label")  # Get the option text
                             if is_similar(option_text.lower() and option_text.strip().lower(), value.lower()):
                                 option.click()
-                                time.sleep(0.5)
+                                WebDriverWait(driver, 2).until(
+                                    lambda d: option.get_attribute("aria-checked") == "true"
+                                )
                                 self.command_log.append(f"Selected: {option_text}")
                                 break  # Stop once we find and click the right option
                 continue
@@ -2286,7 +2250,9 @@ class MyFrame(QMainWindow):
                                 # Find the corresponding text input field inside the radio group
                                 text_field = group.find_element(By.XPATH, ".//input[@type='text']")
                                 text_field.send_keys(value)  # Input custom text
-                                time.sleep(0.5)
+                                WebDriverWait(driver, 2).until(
+                                    lambda d: (text_field.get_attribute("value") or "") != ""
+                                )
 
                                 self.command_log.append(f"Selected: {option_text}, Entered: {value}")
                                 break  # Stop after finding the first "Other" option
@@ -2316,7 +2282,9 @@ class MyFrame(QMainWindow):
                 if len(radio_options) == 1:
                     radio_options[0].click()
                     self.command_log.append("Field :" + group.accessible_name + " = " + radio_options[0].accessible_name)
-                    time.sleep(0.5)  # Small delay to avoid issues
+                    WebDriverWait(driver, 2).until(
+                        lambda d: radio_options[0].get_attribute("aria-checked") == "true"
+                    )
 
     def setGFormRecordEmailCheckbox(self, driver):
         try:
@@ -2325,7 +2293,9 @@ class MyFrame(QMainWindow):
                 if checkbox.get_attribute("aria-checked") != "true":
                     checkbox.click()
                     self.command_log.append("Checked: " + checkbox.accessible_name)
-                    time.sleep(0.5)  # Small delay to avoid issues
+                    WebDriverWait(driver, 2).until(
+                        lambda d: checkbox.get_attribute("aria-checked") == "true"
+                    )
         except NoSuchElementException:
             self.command_log.append("Error: Element not found.")
         except Exception as e:
@@ -2348,7 +2318,9 @@ class MyFrame(QMainWindow):
                 if not selected_option:
                     radio_options[0].click()
                     self.command_log.append("Field :" + group.accessible_name + " = " + radio_options[0].accessible_name + " ")
-                    time.sleep(0.5)  # Small delay to avoid issues
+                    WebDriverWait(driver, 2).until(
+                        lambda d: radio_options[0].get_attribute("aria-checked") == "true"
+                    )
                     return None
                 return None
             return None
@@ -2362,13 +2334,16 @@ class MyFrame(QMainWindow):
         try:
 
             # Locate the dropdown field (adjust XPath based on your form structure)
-            dropdown = driver.find_element(By.XPATH, f"//div[@role='listbox' and @aria-labelledby='{pk_id}']")
+            dropdown = WebDriverWait(driver, 8).until(
+                EC.element_to_be_clickable((By.XPATH, f"//div[@role='listbox' and @aria-labelledby='{pk_id}']"))
+            )
             if dropdown:
                 # Click to open the dropdown
                 dropdown.click()
-                time.sleep(0.5)
 
-                options = driver.find_elements(By.XPATH, "//div[@role='option']")
+                options = WebDriverWait(driver, 8).until(
+                    EC.presence_of_all_elements_located((By.XPATH, "//div[@role='option']"))
+                )
 
                 selected_option = None
                 for option in options:
@@ -2380,7 +2355,6 @@ class MyFrame(QMainWindow):
                 # Select the matched option if found
                 if selected_option:
                     selected_option.click()
-                    time.sleep(0.5)
                     self.command_log.append(f"Selected: {selected_option.get_attribute('data-value')}")
                     return None
                 return None
@@ -2506,7 +2480,7 @@ class MyFrame(QMainWindow):
 
     def setDropDown(self, driver, name, value):
         try:
-            element = driver.find_element("id", name)
+            element = WebDriverWait(driver, 8).until(EC.presence_of_element_located((By.ID, name)))
 
             # Check if the 'title' attribute exists and is not empty
             title_value = element.get_attribute("title")
@@ -2514,20 +2488,23 @@ class MyFrame(QMainWindow):
             if title_value:
                 self.command_log.append(f"Field {name}: already selected ")
             else:
-                combobox = driver.find_element(By.XPATH,
-                                       f"//span[@role='combobox' and @aria-labelledby='{name}']")
+                combobox = WebDriverWait(driver, 8).until(
+                    EC.element_to_be_clickable((By.XPATH, f"//span[@role='combobox' and @aria-labelledby='{name}']"))
+                )
                 # Click to open the dropdown
                 combobox.click()
-                time.sleep(0.5)  # Wait for dropdown options to appear
 
                 # Define the option text to select
-                option = driver.find_element(By.XPATH,
-                                             f"//li[contains(@class, 'select2-results__option') and contains(normalize-space(), '{value}')]")  # Adjust text as needed
+                option = WebDriverWait(driver, 8).until(
+                    EC.element_to_be_clickable((By.XPATH,
+                                                f"//li[contains(@class, 'select2-results__option') and contains(normalize-space(), '{value}')]"))
+                )
                 option.click()
-                time.sleep(0.5)
                 self.command_log.append(f"Field {name}: {value} ")
         except NoSuchElementException:
             self.command_log.append(f"Error: Element with {name} not found. ")
+        except TimeoutException:
+            self.command_log.append(f"Error: Timed out while selecting {name} -> {value}.")
         except Exception as e:
             return
 

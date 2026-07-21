@@ -1,3 +1,3 @@
-"""Compatibility wrapper for db.worker_store."""
+"""Compatibility shim for db.worker_store."""
 
 from db.worker_store import *  # noqa: F401,F403

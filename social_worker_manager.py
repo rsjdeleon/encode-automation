@@ -7,12 +7,12 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 
-from db_worker import (
+from db.worker_store import (
     init_db_worker, get_all_workers, insert_worker,
     update_worker, delete_worker_by_id,
 )
 
-from styles import STYLESHEET
+from ui.styles import STYLESHEET
 
 
 class SocialWorkerWindow(QMainWindow):

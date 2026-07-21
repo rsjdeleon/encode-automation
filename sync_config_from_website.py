@@ -48,8 +48,8 @@ from selenium.common import NoSuchElementException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import Select
 
-from db_config import get_all_lists, get_items, update_item, insert_item
-from db_worker import get_all_workers, update_worker, insert_worker
+from db.config_store import get_all_lists, get_items, update_item, insert_item
+from db.worker_store import get_all_workers, update_worker, insert_worker
 
 # field_id -> (config list key, column being corrected, mode)
 # "per_row": the field has one option per config row, matched by a *different*
@@ -175,7 +175,7 @@ def scrape_options(driver, field_id):
 def scrape_gform_dropdown_options(driver, pk_id):
     """Return the list of option texts for a Google Form dropdown field.
 
-    Mirrors the locator logic assistance-form-new.py's setGFormDropDown() already
+    Mirrors the locator logic assistance_form.py's setGFormDropDown() already
     uses to *select* an option, so scraping stays consistent with how the
     automation actually reads the form: open the div[role=listbox] identified by
     aria-labelledby=pk_id, read data-value off each div[role=option].

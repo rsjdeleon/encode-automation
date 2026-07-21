@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal
 
-from db_config import (
+from db.config_store import (
     init_db_config, seed_from_config_if_empty, backfill_city_regions,
     migrate_gender_to_pairs, migrate_target_sector_to_pairs,
     migrate_mode_of_release_to_pairs, migrate_financial_assistance_to_pairs,
@@ -29,12 +29,16 @@ from db_config import (
 )
 from sync_config_from_website import sync_field, FIELD_SYNC_TARGETS, GFORM_SYNC_TARGETS
 
-from styles import STYLESHEET
+from ui.styles import STYLESHEET
 
-# Address-related lists shown together under a group header in the sidebar,
-# in cascade order, regardless of where they land in config.db's storage order
-# (region_list/province_list were added after list_of_city/barangay_list, so on
-# an existing database they aren't adjacent in config_lists).
+# Primary personal-info group in the sidebar.
+PERSONAL_GROUP_ORDER = {
+    "gender_list": 0,
+    "civil_status_list": 1,
+    "relationship_list": 2,
+}
+
+# Address-related lists shown together under a group header in cascade order.
 ADDRESS_GROUP_ORDER = {"region_list": 0, "province_list": 1, "list_of_city": 2, "barangay_list": 3}
 
 # Sentinel used in category_rows for the standalone "Sync" sidebar entry (not
@@ -331,15 +335,32 @@ class ConfigManagerWindow(QMainWindow):
         self.category_list.clear()
         self.category_rows = []  # QListWidget row -> index into self.lists (None for group headers)
 
-        other_indices = [i for i, row in enumerate(self.lists) if row[1] not in ADDRESS_GROUP_ORDER]
+        personal_indices = sorted(
+            (i for i, row in enumerate(self.lists) if row[1] in PERSONAL_GROUP_ORDER),
+            key=lambda i: PERSONAL_GROUP_ORDER[self.lists[i][1]],
+        )
         address_indices = sorted(
             (i for i, row in enumerate(self.lists) if row[1] in ADDRESS_GROUP_ORDER),
             key=lambda i: ADDRESS_GROUP_ORDER[self.lists[i][1]],
         )
+        assistance_indices = [
+            i for i, row in enumerate(self.lists)
+            if row[1] not in PERSONAL_GROUP_ORDER and row[1] not in ADDRESS_GROUP_ORDER
+        ]
 
-        for idx in other_indices:
-            self.category_list.addItem(self.lists[idx][2])
-            self.category_rows.append(idx)
+        if personal_indices:
+            self._add_category_header("Personal")
+            self.category_rows.append(None)
+            for idx in personal_indices:
+                self.category_list.addItem(self.lists[idx][2])
+                self.category_rows.append(idx)
+
+        if assistance_indices:
+            self._add_category_header("Assistance")
+            self.category_rows.append(None)
+            for idx in assistance_indices:
+                self.category_list.addItem(self.lists[idx][2])
+                self.category_rows.append(idx)
 
         if address_indices:
             self._add_category_header("Address")

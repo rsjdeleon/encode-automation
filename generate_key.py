@@ -1,27 +1,9 @@
-from license import generate_trial_key
-import getpass
+"""Compatibility wrapper for scripts/generate_key.py."""
+
+import os
+import runpy
+
 
 if __name__ == "__main__":
-    try:
-        password = getpass.getpass("Enter password: ")
-        if password == "adminfcc":
-            deviceId = input("Enter Device Id: ").strip()
-            deviceIdArray = deviceId.split(":")
-            print("-" * 100)
-            print(f"deviceId: {deviceIdArray[0]} ")
-            print("-" * 100)
-            # Trial keys
-            for days in [1, 2, 3, 5, 7, 14, 15, 21, 30]:
-                key = generate_trial_key(days, deviceIdArray[0])
-                print(f"Trial {days} days key: {key}")
-            print("-" * 100)
-            if len(deviceIdArray) == 2 :
-                lifetime_key = generate_trial_key()
-                print(f"Lifetime key: {lifetime_key}")
-                print("-" * 100)
-            # Lifetime key
-
-        else:
-            print("Invalid Password.")
-    finally:
-        input("Press Enter to exit...")
+    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", "generate_key.py")
+    runpy.run_path(script_path, run_name="__main__")
