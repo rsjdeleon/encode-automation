@@ -46,6 +46,40 @@ This allows existing imports to continue working while package layout is adopted
 - Keep using build_release.ps1 at repo root.
 - The root script delegates to build/build_release.ps1.
 
+## Build executables
+
+### Prerequisites
+- Use the project virtual environment at .venv.
+- Install dependencies from requirements.txt.
+- PyInstaller must be available in the virtual environment.
+
+### Windows build
+Run from the repository root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build_release.ps1
+```
+
+### What the build script does
+- Builds assistance_form.py, config_manager.py, and social_worker_manager.py as windowed PyInstaller apps.
+- Places the final executables in dist-release/.
+- Copies each app's bundled runtime folder into dist-release/.
+- Seeds shared data files into dist-release/ only if they are not already present:
+  - config.db
+  - person-record.db
+  - worker.db
+  - data-new.pkl
+  - default.png
+  - license.json
+
+### Expected output
+After a successful build, dist-release/ contains:
+- assistance_form.exe
+- config_manager.exe
+- social_worker_manager.exe
+- the corresponding _internal_* runtime folders
+- the shared data files listed above
+
 ## Operational docs
 - Main config work log: docs/maintenance/CONFIG_WORK.md
 - Migration tracker: archive/MIGRATION_INDEX.md

@@ -101,6 +101,7 @@ QTableWidget, QListWidget {
     gridline-color: #e2e8f0;
     font-size: 11px;
     alternate-background-color: #f8fafc;
+    color: #0f172a;
 }
 
 QListWidget::item {
@@ -114,6 +115,7 @@ QListWidget::item:selected {
 
 QTableWidget::item {
     padding: 3px;
+    color: #0f172a;
 }
 
 QTableWidget::item:selected {

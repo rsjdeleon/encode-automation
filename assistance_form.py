@@ -139,45 +139,68 @@ class MyFrame(QMainWindow):
     _sig_select_first = Signal()
     _sig_msg_box = Signal(str, str, str)  # title, message, kind (info/error)
 
+    def _format_table_date(self, value):
+        if not value:
+            return ""
+        if isinstance(value, datetime):
+            return value.strftime("%m/%d/%Y")
+        if isinstance(value, str):
+            for pattern in ("%Y-%m-%d", "%m/%d/%Y", "%Y/%m/%d"):
+                try:
+                    return datetime.strptime(value, pattern).strftime("%m/%d/%Y")
+                except ValueError:
+                    continue
+        return str(value)
+
+    def _table_foreground_for_background(self, background_color):
+        """Return a readable text color for a given row background."""
+        luminance = (
+            0.299 * background_color.red()
+            + 0.587 * background_color.green()
+            + 0.114 * background_color.blue()
+        )
+        return QColor(255, 255, 255) if luminance < 140 else QColor(0, 0, 0)
+
     def load_data_person(self):
         is_encoded = "1" if self.cb_encoded.isChecked() else "0"
         selected_row = self.list_ctrl.currentRow()
+        sorting_was_enabled = self.list_ctrl.isSortingEnabled()
+        self.list_ctrl.setSortingEnabled(False)
         self.list_ctrl.setRowCount(0)
         self.row_data.clear()
-
-        sw_color_map = {}
         sw_column_index = 7
         assist_map = {0: "Medical", 1: "Burial", 2: "Transportation", 3: "Cash Support", 4: "Food"}
 
-        for row in get_all_person_by_encoded(is_encoded):
-            sw_value = row[sw_column_index]
-            if sw_value not in sw_color_map:
-                sw_color_map[sw_value] = QColor(
-                    random.randint(180, 255),
-                    random.randint(200, 255),
-                    random.randint(180, 255)
-                )
+        try:
+            for row in get_all_person_by_encoded(is_encoded):
+                assist = assist_map.get(row[4], "")
+                bday = self._format_table_date(row[17])
+                r = self.list_ctrl.rowCount()
+                self.list_ctrl.insertRow(r)
+                for col, val in enumerate([
+                    str(row[0]), row[12], str(row[13]), str(row[14]), str(row[15]),
+                    bday, str(row[18]), assist, str(row[5]), str(row[7]), str(row[38])
+                ]):
+                    item = QTableWidgetItem(val)
+                    if col == 5:
+                        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    item.setForeground(QColor(15, 23, 42))
+                    item.setBackground(QColor(255, 255, 255))
+                    self.list_ctrl.setItem(r, col, item)
 
-            assist = assist_map.get(row[4], "")
-            r = self.list_ctrl.rowCount()
-            self.list_ctrl.insertRow(r)
-            for col, val in enumerate([
-                str(row[0]), row[12], str(row[13]), str(row[14]), str(row[15]),
-                str(row[17]), str(row[18]), assist, str(row[5]), str(row[7]), str(row[38])
-            ]):
-                item = QTableWidgetItem(val)
-                self.list_ctrl.setItem(r, col, item)
+                # Strong visual warning only for rows that need attention.
+                if row[40] == 1:
+                    warning_bg = QColor(220, 38, 38)
+                    warning_fg = QColor(255, 255, 255)
+                    for col in range(self.list_ctrl.columnCount()):
+                        item = self.list_ctrl.item(r, col)
+                        item.setBackground(warning_bg)
+                        item.setForeground(warning_fg)
+                for col in range(self.list_ctrl.columnCount()):
+                    item = self.list_ctrl.item(r, col)
+                    item.setFont(self.list_ctrl.font())
 
-            # Row color
-            bg = sw_color_map[sw_value]
-            if row[40] == 1:
-                bg = QColor(255, 0, 0)
-            for col in range(self.list_ctrl.columnCount()):
-                self.list_ctrl.item(r, col).setBackground(bg)
-                if row[37] == 1:
-                    self.list_ctrl.item(r, col).setForeground(QColor(0, 0, 255))
-
-            self.row_data[row[0]] = {
+                self.row_data[row[0]] = {
                 "id": row[0], "encoder_name": row[1], "date_encoded": row[2],
                 "target_sector": row[3], "financial_assist": row[4], "amount": row[5],
                 "fund_source": row[6], "sw_full_name": row[7],
@@ -193,12 +216,18 @@ class MyFrame(QMainWindow):
                 "bene_city": row[36], "has_beneficiary": row[37], "encoded": row[38],
                 "target_sector_bene": row[39], "mode_release": row[40], "approved_by": row[41],
                 "sub_category": row[42],
-                "client_region": row[43], "client_province": row[44],
-                "bene_region": row[45], "bene_province": row[46],
-            }
+                    "client_region": row[43], "client_province": row[44],
+                    "bene_region": row[45], "bene_province": row[46],
+                }
+        finally:
+            self.list_ctrl.setSortingEnabled(sorting_was_enabled)
 
         if 0 <= selected_row < self.list_ctrl.rowCount():
             self.list_ctrl.selectRow(selected_row)
+
+        self.list_ctrl.resizeColumnsToContents()
+        self.list_ctrl.resizeRowsToContents()
+        self.list_ctrl.horizontalHeader().setStretchLastSection(True)
 
     def select_first_item(self):
         if self.list_ctrl.rowCount() > 0:
@@ -858,9 +887,16 @@ class MyFrame(QMainWindow):
             "ID", "Lastname", "Firstname", "Middlename", "Ext",
             "Bday", "Age", "Assistance", "Amount", "SW", "Encoded"
         ])
-        self.list_ctrl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        header = self.list_ctrl.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(True)
+        header.setDefaultSectionSize(110)
+        header.setMinimumSectionSize(70)
+        self.list_ctrl.setColumnWidth(5, 110)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         self.list_ctrl.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.list_ctrl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.list_ctrl.setSortingEnabled(True)
         self.list_ctrl.itemSelectionChanged.connect(self.on_select_person)
         set_table_visible_rows(self.list_ctrl, 5)
         crud_container.addWidget(self.list_ctrl)
@@ -1652,17 +1688,91 @@ class MyFrame(QMainWindow):
     offline_page_title = ""
     mov_page_title = ""
 
+    def _normalize_crims_bday_text(self, value):
+        """Normalize CRIMS birthday text to the yyyy-mm-dd table format."""
+        if isinstance(value, QDate):
+            text = value.toString("yyyy-MM-dd")
+        elif isinstance(value, datetime):
+            text = value.strftime("%Y-%m-%d")
+        else:
+            text = "" if value is None else str(value)
+
+        collapsed = "".join(text.split())
+        if not collapsed:
+            return ""
+
+        for pattern in ("%Y-%m-%d", "%m/%d/%Y", "%m-%d-%Y", "%Y/%m/%d"):
+            try:
+                return datetime.strptime(collapsed, pattern).strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+        return collapsed
+
+    def _click_search_result_row_by_bday(self, driver, target_bday):
+        """Open the first searched client row whose visible birthday matches."""
+        normalized_target = self._normalize_crims_bday_text(target_bday)
+        if not normalized_target:
+            self.command_log.append("Birthday match skipped: no target birthday available.")
+            return False
+
+        row_xpath = (
+            "//table//tbody/tr[.//*[contains(@class, 'glyphicon-share-alt')]]"
+            " | //table//tr[.//*[contains(@class, 'glyphicon-share-alt')]]"
+        )
+
+        try:
+            rows = WebDriverWait(driver, 8).until(
+                lambda d: [row for row in d.find_elements(By.XPATH, row_xpath) if row.is_displayed()]
+            )
+        except TimeoutException:
+            self.command_log.append("Search results did not load in time.")
+            return False
+
+        for row in rows:
+            for cell in row.find_elements(By.TAG_NAME, "td"):
+                visible_bday = self._normalize_crims_bday_text(cell.text)
+                if visible_bday != normalized_target:
+                    continue
+
+                try:
+                    action = row.find_element(
+                        By.XPATH,
+                        ".//a[.//*[contains(@class, 'glyphicon-share-alt')]]"
+                        " | .//*[contains(@class, 'glyphicon-share-alt')]",
+                    )
+                    action.click()
+                    self.command_log.append(f"Opened existing client with birthday {normalized_target}.")
+                    return True
+                except NoSuchElementException:
+                    self.command_log.append(
+                        f"Birthday {normalized_target} matched, but no row action was found."
+                    )
+                    return False
+                except Exception as exc:
+                    self.command_log.append(
+                        f"Birthday {normalized_target} matched, but opening the row failed: {exc}"
+                    )
+                    return False
+
+        self.command_log.append(
+            f"Name search returned rows, but none matched birthday {normalized_target}."
+        )
+        return False
+
     def on_fill_crims_website(self, driver):
         try:
             if self.clickHrefButton(driver, "Add Client"):
                 c_full_name = f'{self.client_lastname.text()} {self.client_firstname.text()} {self.client_middlename.text()}'
                 if self.hasASearchField(driver, c_full_name):
-                    if self.searchResult(driver) :
+                    if self.searchResult(driver):
+                        self.command_log.append("No name match found. Adding a new client.")
                         self.clickAddButton(driver, "Add Client")
                         return None
-                    else:
-                        self.clickIconButton(driver)
+                    if self._click_search_result_row_by_bday(driver, self.client_bday.date()):
                         return None
+                    self.command_log.append("No birthday-matching row found. Adding a new client.")
+                    self.clickAddButton(driver, "Add Client")
+                    return None
                 return None
 
             if self.clickHrefButton(driver, "Add Beneficiary"):
@@ -2569,6 +2679,7 @@ class MyFrame(QMainWindow):
             search_input = driver.find_element(By.XPATH, "//input[@placeholder='Search']")
 
             # Type the search query
+            search_input.clear()
             search_input.send_keys(value)
             self.command_log.append(f"Search Text: {value} ")
             time.sleep(1)
